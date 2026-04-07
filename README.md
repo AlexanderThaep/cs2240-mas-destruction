@@ -1,0 +1,1 @@
+**Don't forget to do set up a virtual environment and run `python setup.py` first**

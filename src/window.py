@@ -1,0 +1,126 @@
+import pygame as pg
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from voxels import VoxelMesh
+
+
+class Camera:
+    def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0,0,0)):
+        self.distance = distance
+        self.yaw   = yaw
+        self.pitch = pitch
+        self.target = list(target)
+
+    def apply(self):
+        glLoadIdentity()
+        gluLookAt(0, 0, self.distance, 0, 0, 0, 0, 1, 0)
+        glRotatef(-self.pitch, 1, 0, 0)
+        glRotatef(-self.yaw,   0, 1, 0)
+        glTranslatef(-self.target[0], -self.target[1], -self.target[2])
+
+    def orbit(self, dx, dy):
+        self.yaw   += dx * 0.3
+        self.pitch += dy * 0.3
+        self.pitch = max(-89, min(89, self.pitch))
+
+    def zoom(self, delta):
+        self.distance *= 0.9 if delta > 0 else 1.1
+        self.distance = max(1.0, self.distance)
+
+
+def init_gl(width, height):
+    glEnable(GL_DEPTH_TEST)
+    glEnable(GL_LIGHTING)
+    glEnable(GL_LIGHT0)
+    glEnable(GL_COLOR_MATERIAL)
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+    glClearColor(0.15, 0.15, 0.18, 1.0)
+
+    glLight(GL_LIGHT0, GL_POSITION, (0.3, 1.0, 0.5, 0.0))
+    glLight(GL_LIGHT0, GL_DIFFUSE,  (1.0, 1.0, 1.0, 1.0))
+    glLight(GL_LIGHT0, GL_AMBIENT,  (0.2, 0.2, 0.2, 1.0))
+
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(45, width / height, 0.1, 500.0)
+    glMatrixMode(GL_MODELVIEW)
+
+
+def draw_mesh(mesh: VoxelMesh, color=(0.6, 0.7, 0.8)):
+    """Draw all boundary faces as flat-shaded quads."""
+    verts, normals = mesh.boundary_faces()
+    verts   = verts.cpu()
+    normals = normals.cpu()
+
+    glColor3f(*color)
+    glBegin(GL_QUADS)
+    for f in range(verts.shape[0]):
+        nx, ny, nz = normals[f].tolist()
+        glNormal3f(nx, ny, nz)
+        for v in range(4):
+            px, py, pz = verts[f, v].tolist()
+            glVertex3f(px, py, pz)
+    glEnd()
+
+
+def draw_edges(mesh: VoxelMesh, color=(0.0, 0.0, 0.0)):
+    """Draw boundary face edges as wireframe overlay."""
+    verts, _ = mesh.boundary_faces()
+    verts = verts.cpu()
+
+    glDisable(GL_LIGHTING)
+    glColor3f(*color)
+    glLineWidth(1.0)
+    glBegin(GL_LINES)
+    for f in range(verts.shape[0]):
+        for i in range(4):
+            j = (i + 1) % 4
+            px, py, pz = verts[f, i].tolist()
+            qx, qy, qz = verts[f, j].tolist()
+            glVertex3f(px, py, pz)
+            glVertex3f(qx, qy, qz)
+    glEnd()
+    glEnable(GL_LIGHTING)
+
+
+def run(mesh: VoxelMesh, title="voxels", size=(800, 800)):
+    pg.init()
+    pg.display.set_mode(size, DOUBLEBUF | OPENGL)
+    pg.display.set_caption(title)
+    init_gl(*size)
+
+    # center camera on mesh
+    center = mesh.node_pos.mean(dim=0).tolist()
+    span   = (mesh.node_pos.max() - mesh.node_pos.min()).item()
+    cam    = Camera(distance=span * 1.8, target=center)
+
+    clock = pg.time.Clock()
+    dragging = False
+
+    while True:
+        for ev in pg.event.get():
+            if ev.type == QUIT or (ev.type == KEYDOWN and ev.key == K_ESCAPE):
+                pg.quit()
+                return
+            elif ev.type == MOUSEBUTTONDOWN and ev.button == 1:
+                dragging = True
+            elif ev.type == MOUSEBUTTONUP and ev.button == 1:
+                dragging = False
+            elif ev.type == MOUSEMOTION and dragging:
+                cam.orbit(ev.rel[0], ev.rel[1])
+            elif ev.type == MOUSEWHEEL:
+                cam.zoom(ev.y)
+
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        cam.apply()
+
+        # Add a slight polygon offset so edges sit on top of faces
+        glEnable(GL_POLYGON_OFFSET_FILL)
+        glPolygonOffset(1.0, 1.0)
+        draw_mesh(mesh)
+        glDisable(GL_POLYGON_OFFSET_FILL)
+        draw_edges(mesh)
+
+        pg.display.flip()
+        clock.tick(60)

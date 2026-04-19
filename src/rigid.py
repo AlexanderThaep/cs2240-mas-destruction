@@ -50,3 +50,33 @@ def integrate_rigid_body(
     orientation = orientation.normalized()
 
     return com, orientation
+
+def apply_tra_voxels(
+    world_coords: torch.Tensor,  # (V,3) world-space voxel positions
+    old_com: torch.Tensor,       # (3,) old COM
+    com: torch.Tensor            # (3,) new COM
+):
+    """
+    Applies translation to world-space voxels based on COM delta.
+    """
+
+    pts = world_coords.to(dtype=com.dtype)
+    delta = com - old_com
+
+    return pts + delta
+
+def apply_rot_voxels(
+    world_coords: torch.Tensor,  # (V,3) world-space voxel positions
+    com: torch.Tensor,           # (3,)
+    orientation: Quaternion      # unit quaternion
+):
+    """
+    Applies rotation about COM to world-space voxels.
+    """
+
+    pts = world_coords.to(dtype=com.dtype)
+    rel = pts - com
+    rotated = orientation.rotate_vector(rel)
+    world_coords = rotated + com
+
+    return world_coords

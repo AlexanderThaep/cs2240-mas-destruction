@@ -152,12 +152,12 @@ class VoxelMesh:
                 voxel_nodes[v, n] = group_node_idx[root]
 
         N = len(unique_node_positions)
-        self.node_rest  = torch.tensor(unique_node_positions, dtype=torch.float32) * self.h
+        self.node_rest = torch.tensor(unique_node_positions, dtype=torch.float32) * self.h
         self.voxel_nodes = voxel_nodes
-        self.node_pos  = self.node_rest.clone()
-        self.node_vel  = torch.zeros(N, 3)
+        self.node_pos = self.node_rest.clone()
+        self.node_vel = torch.zeros(N, 3)
 
-        # lumped mass (voxel mass distributed equally to 8 corners)
+        # Lumped mass (voxel mass distributed equally to 8 corner nodes)
         voxel_mass = density * self.h ** 3
         self.node_mass = torch.zeros(N)
         for v in range(V):
@@ -207,14 +207,14 @@ class VoxelMesh:
 
     def boundary_faces(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Exposed boundary quad faces (i.e. those that are part of exactly one voxel)."""
-        mask = self.links == -1               # (V,6)
-        vi, fi = mask.nonzero(as_tuple=True)
+        mask = self.links == -1  # (V,6)
+        voxel_idx, face_idx = mask.nonzero(as_tuple=True)
 
-        local   = FACE_NODES[fi]              # (F,4) local corner ids
-        glob    = self.voxel_nodes[vi]        # (F,8) global node ids
-        fnodes  = glob.gather(1, local)       # (F,4)
-        verts   = self.node_pos[fnodes]       # (F,4,3)
-        normals = FACE_NORMALS[fi]            # (F,3)
+        local = FACE_NODES[face_idx]        # (F,4) local node ids
+        glob = self.voxel_nodes[voxel_idx]  # (F,8) global node ids
+        face_nodes = glob.gather(1, local)  # (F,4)
+        verts = self.node_pos[face_nodes]   # (F,4,3)
+        normals = FACE_NORMALS[face_idx]    # (F,3)
         return verts, normals
 
     def boundary_face_voxels(self) -> torch.Tensor:

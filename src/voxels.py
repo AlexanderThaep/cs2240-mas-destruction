@@ -233,3 +233,21 @@ class VoxelMesh:
                 x, y, z = line.split()
                 coords.append([int(x), int(y), int(z)])
         return VoxelMesh.from_grid_coords(torch.tensor(coords), h=h)
+    
+    @staticmethod
+    def from_py(module, h: float = 1.0) -> "VoxelMesh":
+        """
+        Load voxel data from a Python module with a `lookup` list of dicts.
+        Each entry: { 'x': int, 'y': int, 'z': int, ... }
+        """
+
+        if not hasattr(module, "lookup"):
+            raise ValueError("Module must have a `lookup` attribute")
+
+        coords = [
+            [entry["x"], entry["y"], entry["z"]]
+            for entry in module.lookup
+        ]
+
+        coords = torch.tensor(coords, dtype=torch.int32)
+        return VoxelMesh.from_grid_coords(coords, h=h)

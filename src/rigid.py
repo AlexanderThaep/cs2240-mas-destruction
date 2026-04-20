@@ -11,12 +11,15 @@ def compute_voxel_com(
     pts = world_coords.to(dtype=torch.float32)
     return pts.mean(dim=0)
 
+# TODO: what does this all mean?!
+# centroids[v] = (voxel_coords[v] + 1/2)h - x rest center of mass
 def compute_voxel_inertia(
     com,
-    world_coords, 
+    voxel_coords, 
     mass
 ):
-    pts = world_coords - com
+    pts = (voxel_coords + 0.5) - com
+
     V = pts.shape[0]
     m = mass / V
 
@@ -29,7 +32,6 @@ def compute_voxel_inertia(
     return I
 
 def integrate_rigid_body(
-    mass,
     com,              # (3,) tensor
     velocity,         # (3,)
     angular_velocity, # (3,) ω
@@ -37,6 +39,7 @@ def integrate_rigid_body(
     inertia_body,     # (3,3) inertia in body frame
     torque,           # (3,) world torque
     force,            # (3,) world force
+    mass,
     dt
 ):
     """
@@ -51,7 +54,7 @@ def integrate_rigid_body(
     velocity = velocity + acceleration * dt
     com = com + velocity * dt
 
-    R = orientation.rotation_matrix()
+    R = orientation.to_rotation_matrix()
     I_world = R @ inertia_body @ R.T
     I_inv = torch.inverse(I_world)
 
@@ -68,7 +71,7 @@ def integrate_rigid_body(
 
     dq = 0.5 * omega_quat * orientation
     orientation = orientation + dq * dt
-    orientation = orientation.normalized()
+    orientation = orientation.normalize()
 
     return com, velocity, orientation, angular_velocity
 
@@ -84,8 +87,6 @@ def apply_voxels(
     """
 
     pts = world_coords.to(dtype=com.dtype)
-    delta = com - old_com
-    rel = pts - com
+    rel = pts - old_com
     rotated = orientation.rotate_vector(rel)
-
-    return rotated + (pts + delta)
+    return rotated + com

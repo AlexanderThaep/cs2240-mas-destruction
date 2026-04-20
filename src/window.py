@@ -155,3 +155,45 @@ def run(mesh: VoxelMesh, title="voxels", size=(800, 800)):
 
         pg.display.flip()
         clock.tick(60)
+
+def run_scene(meshes: list[VoxelMesh], title="scene", size=(800, 800)):
+    pg.init()
+    pg.display.set_mode(size, DOUBLEBUF | OPENGL)
+    pg.display.set_caption(title)
+    init_gl(*size)
+
+    # center camera on mesh
+    center = torch.Tensor([0.0, 0.0, 0.0]).tolist()
+    span   = 10.0
+    cam    = Camera(distance=span * 1.8, target=center)
+
+    clock = pg.time.Clock()
+    dragging = False
+
+    while True:
+        for ev in pg.event.get():
+            if ev.type == QUIT or (ev.type == KEYDOWN and ev.key == K_ESCAPE):
+                pg.quit()
+                return
+            elif ev.type == MOUSEBUTTONDOWN and ev.button == 1:
+                dragging = True
+            elif ev.type == MOUSEBUTTONUP and ev.button == 1:
+                dragging = False
+            elif ev.type == MOUSEMOTION and dragging:
+                cam.orbit(ev.rel[0], ev.rel[1])
+            elif ev.type == MOUSEWHEEL:
+                cam.zoom(ev.y)
+
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        cam.apply()
+
+        for m in meshes:
+            # Add a slight polygon offset so edges sit on top of faces
+            glEnable(GL_POLYGON_OFFSET_FILL)
+            glPolygonOffset(1.0, 1.0)
+            draw_mesh(m)
+            glDisable(GL_POLYGON_OFFSET_FILL)
+            draw_edges(m)
+
+        pg.display.flip()
+        clock.tick(60)

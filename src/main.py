@@ -35,4 +35,5 @@ print(f"components: {mesh.connected_components().max().item() + 1}")
 # for nid in right_nodes:
 #     mesh.node_pos[nid, 0] += 1.5
 
-window.run(mesh)
+# window.run(mesh)
+window.run_scene([mesh])

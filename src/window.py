@@ -3,7 +3,7 @@ from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from voxels import VoxelMesh
-
+import rigid
 
 class Camera:
     def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0,0,0)):
@@ -114,6 +114,8 @@ def run(mesh: VoxelMesh, title="voxels", size=(800, 800)):
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         cam.apply()
+
+        I = rigid.compute_voxel_inertia()
 
         # Add a slight polygon offset so edges sit on top of faces
         glEnable(GL_POLYGON_OFFSET_FILL)

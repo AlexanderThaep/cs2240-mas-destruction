@@ -3,12 +3,15 @@ from quatorch import Quaternion
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
-def compute_voxel_inertia(
-        com,
-        world_coords, 
-        mass
-    ):
+def compute_voxel_com(
+):
+    pass
 
+def compute_voxel_inertia(
+    com,
+    world_coords, 
+    mass
+):
     pts = world_coords - com
     V = pts.shape[0]
     m = mass / V
@@ -65,32 +68,20 @@ def integrate_rigid_body(
 
     return com, velocity, orientation, angular_velocity
 
-def apply_tra_voxels(
+def apply_voxels(
     world_coords: torch.Tensor,  # (V,3) world-space voxel positions
     old_com: torch.Tensor,       # (3,) old COM
-    com: torch.Tensor            # (3,) new COM
+    com: torch.Tensor,           # (3,) new COM
+    orientation: Quaternion      # unit quaternion
 ):
     """
-    Applies translation to world-space voxels based on COM delta.
+    Applies translation to world-space voxels based on COM delta
+    and applies rotation about COM to world-space voxels.
     """
 
     pts = world_coords.to(dtype=com.dtype)
     delta = com - old_com
-
-    return pts + delta
-
-def apply_rot_voxels(
-    world_coords: torch.Tensor,  # (V,3) world-space voxel positions
-    com: torch.Tensor,           # (3,)
-    orientation: Quaternion      # unit quaternion
-):
-    """
-    Applies rotation about COM to world-space voxels.
-    """
-
-    pts = world_coords.to(dtype=com.dtype)
     rel = pts - com
     rotated = orientation.rotate_vector(rel)
-    world_coords = rotated + com
 
-    return world_coords
+    return rotated + (pts + delta)

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 Q_IDENTITY = Quaternion(torch.tensor([1.0, 0.0, 0.0, 0.0]))
+T_IDENTITY = torch.Tensor([1.0, 1.0, 1.0])
 
 def compute_voxel_com(
     world_coords

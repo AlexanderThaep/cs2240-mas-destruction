@@ -6,6 +6,7 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 from voxels import VoxelMesh
 import rigid
+import rigidbody
 
 class Camera:
     def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0,0,0)):
@@ -116,9 +117,9 @@ def run(mesh: VoxelMesh, title="voxels", size=(800, 800)):
 
     com = rigid.compute_voxel_com(mesh.node_rest)
     M = 0.2
-    I = rigid.compute_voxel_inertia(com, mesh.voxel_coords, M)
     V = torch.tensor([0.0, 0.0, 0.0])
     W = torch.tensor([0.0, 0.0, 0.0])
+    I = rigid.compute_voxel_inertia(com, mesh.voxel_coords, M)
 
     new_com = com.clone()
 
@@ -162,13 +163,35 @@ def run_scene(meshes: list[VoxelMesh], title="scene", size=(800, 800)):
     pg.display.set_caption(title)
     init_gl(*size)
 
-    # center camera on mesh
-    center = torch.Tensor([0.0, 0.0, 0.0]).tolist()
-    span   = 10.0
+    # center camera on first mesh
+    center = meshes[0].node_rest.mean(dim=0).tolist()
+    span   = (meshes[0].node_rest.max() - meshes[0].node_rest.min()).item()
     cam    = Camera(distance=span * 1.8, target=center)
 
     clock = pg.time.Clock()
     dragging = False
+
+    M = 0.2
+    V = torch.tensor([0.0, 0.0, 0.0])
+    W = torch.tensor([0.0, 0.0, 0.0])
+    tq = torch.tensor([0.0, 0.8, 0.4])
+    f = torch.tensor([0.0, 0.0, 0.0])
+
+    rigidbodies = []
+
+    for m in meshes:
+        r = rigidbody.RigidBody(
+                com=rigid.T_IDENTITY,
+                inertia_body=rigid.T_IDENTITY,
+                mass=M, 
+                orientation=rigid.Q_IDENTITY, 
+                velocity=V, 
+                angular_vel=W
+            )
+        r._init_com(m.node_rest)
+        r._init_voxel_inertia(m.voxel_coords)
+
+        rigidbodies.append((m, r))
 
     while True:
         for ev in pg.event.get():
@@ -187,7 +210,13 @@ def run_scene(meshes: list[VoxelMesh], title="scene", size=(800, 800)):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         cam.apply()
 
-        for m in meshes:
+        for mr in rigidbodies:
+            m = mr[0]
+            r = mr[1]
+
+            r.integrate_rigid_body(torque=tq, force=f, dt=1/60)
+            m.node_rest = r.apply_voxels(m.node_rest)
+
             # Add a slight polygon offset so edges sit on top of faces
             glEnable(GL_POLYGON_OFFSET_FILL)
             glPolygonOffset(1.0, 1.0)

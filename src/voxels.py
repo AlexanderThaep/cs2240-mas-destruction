@@ -42,7 +42,7 @@ class VoxelMesh:
     h:             float         # Voxel edge length (world units)
 
     # --- voxel node arrays rebuilt after fracture ---
-    voxel_nodes:   torch.Tensor  # (V,8) Per-element node indices
+    voxel_nodes:   torch.Tensor  # (V,8) Per-voxel node indices
     node_rest:     torch.Tensor  # (N,3) Rest positions
 
     # --- simulation state ---
@@ -99,18 +99,18 @@ class VoxelMesh:
         """
         V = self.V
         grid_coords = self.voxel_coords                                      # (V,3)
-        nodes_at_pos = grid_coords.unsqueeze(1) + NODE_OFFSETS.unsqueeze(0)  # (V,8,3)
+        node_positions = grid_coords.unsqueeze(1) + NODE_OFFSETS.unsqueeze(0)  # (V,8,3)
 
         # Group (voxel, node) by grid position of the node, so that pos_to_node[p]
         # contains up to 8 voxels that have that grid-space as a valid node.
         pos_to_nodes: Dict[Tuple[int,int,int], list] = {}
         for v in range(V):
-            for c in range(8):
-                key = (nodes_at_pos[v,c,0].item(), nodes_at_pos[v,c,1].item(), nodes_at_pos[v,c,2].item())
-                pos_to_nodes.setdefault(key, []).append((v, c))
+            for n in range(8):
+                key = (node_positions[v,n,0].item(), node_positions[v,n,1].item(), node_positions[v,n,2].item())
+                pos_to_nodes.setdefault(key, []).append((v, n))
 
         voxel_nodes = torch.zeros(V, 8, dtype=torch.long)
-        node_grid_positions: list = []
+        unique_node_positions: list = []
         node_idx = 0
 
         for pos, nodes_at_pos in pos_to_nodes.items():
@@ -126,33 +126,33 @@ class VoxelMesh:
 
             # Check if there's only one voxel at this node position (no need to union then)
             if len(voxels_at_pos) == 1:
-                for v, c in nodes_at_pos:
-                    voxel_nodes[v, c] = node_idx
-                node_grid_positions.append(pos)
+                for v, n in nodes_at_pos:
+                    voxel_nodes[v, n] = node_idx
+                unique_node_positions.append(pos)
                 node_idx += 1
                 continue
 
             # Union linked voxels at this node
-            for v1 in voxels_at_pos:
+            for va in voxels_at_pos:
                 for i in range(6):
-                    v2 = self.links[v1, i].item()
-                    if v2 in voxels_at_pos:
-                        ra, rb = find(v1), find(v2)
+                    vb = self.links[va, i].item()
+                    if vb in voxels_at_pos:
+                        ra, rb = find(va), find(vb)
                         if ra != rb:
                             parent[rb] = ra
 
             # Enforce one node per connected group
             group_node_idx: Dict[int, int] = {}
-            for v, c in nodes_at_pos:
+            for v, n in nodes_at_pos:
                 root = find(v)
                 if root not in group_node_idx:
                     group_node_idx[root] = node_idx
-                    node_grid_positions.append(pos)
+                    unique_node_positions.append(pos)
                     node_idx += 1
-                voxel_nodes[v, c] = group_node_idx[root]
+                voxel_nodes[v, n] = group_node_idx[root]
 
-        N = len(node_grid_positions)
-        self.node_rest  = torch.tensor(node_grid_positions, dtype=torch.float32) * self.h
+        N = len(unique_node_positions)
+        self.node_rest  = torch.tensor(unique_node_positions, dtype=torch.float32) * self.h
         self.voxel_nodes = voxel_nodes
         self.node_pos  = self.node_rest.clone()
         self.node_vel  = torch.zeros(N, 3)
@@ -161,8 +161,8 @@ class VoxelMesh:
         voxel_mass = density * self.h ** 3
         self.node_mass = torch.zeros(N)
         for v in range(V):
-            for c in range(8):
-                self.node_mass[voxel_nodes[v, c]] += voxel_mass / 8.0
+            for n in range(8):
+                self.node_mass[voxel_nodes[v, n]] += voxel_mass / 8.0
 
     def break_link(self, va: int, vb: int):
         """Voxel fracturing. Severs face-adjacency between two voxels."""
@@ -176,14 +176,14 @@ class VoxelMesh:
         """Rebuild nodes. Copies state from old node arrays."""
         old_pos  = self.node_pos.clone()
         old_vel  = self.node_vel.clone()
-        old_elem = self.voxel_nodes.clone()
+        old_nodes = self.voxel_nodes.clone()
 
         self._build_nodes(density)
 
         for v in range(self.V):
-            for c in range(8):
-                self.node_pos[self.voxel_nodes[v, c]] = old_pos[old_elem[v, c]]
-                self.node_vel[self.voxel_nodes[v, c]] = old_vel[old_elem[v, c]]
+            for n in range(8):
+                self.node_pos[self.voxel_nodes[v, n]] = old_pos[old_nodes[v, n]]
+                self.node_vel[self.voxel_nodes[v, n]] = old_vel[old_nodes[v, n]]
 
     def connected_components(self) -> torch.Tensor:
         """Union-find on voxel links. Returns (V) labels in [0..C-1]."""
@@ -211,7 +211,7 @@ class VoxelMesh:
         vi, fi = mask.nonzero(as_tuple=True)
 
         local   = FACE_NODES[fi]              # (F,4) local corner ids
-        glob    = self.voxel_nodes[vi]         # (F,8) global node ids
+        glob    = self.voxel_nodes[vi]        # (F,8) global node ids
         fnodes  = glob.gather(1, local)       # (F,4)
         verts   = self.node_pos[fnodes]       # (F,4,3)
         normals = FACE_NORMALS[fi]            # (F,3)

@@ -28,8 +28,8 @@ FACE_NORMALS = torch.tensor([
 
 NEIGHBOR_OFFSETS = [(-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)]
 
-# 28 lattice springs per voxel: 12 edges + 12 face diagonals + 4 body diagonals.
-# Edge-only springs leave zero-energy shear modes; the extras kill them.
+# 28 lattice springs per voxel.
+# 12 edges + 12 face diagonals + 4 body diagonals.
 VOXEL_SPRINGS = torch.tensor([
     # 12 axial edges
     [0,1],[1,2],[2,3],[3,0],
@@ -58,13 +58,13 @@ class Voxels:
 
     # --- spring-mass system springs ---
     edges:         torch.Tensor = None   # (E,2)
-    edge_rest:     torch.Tensor = None   # (E,)
+    edge_rest:     torch.Tensor = None   # (E)
 
     # --- simulation state ---
     node_rest:     torch.Tensor = None   # (N,3)
     node_pos:      torch.Tensor = None   # (N,3)
     node_vel:      torch.Tensor = None   # (N,3)
-    node_mass:     torch.Tensor = None   # (N,)
+    node_mass:     torch.Tensor = None   # (N)
 
     @property
     def V(self) -> int: return self.voxel_coords.shape[0]

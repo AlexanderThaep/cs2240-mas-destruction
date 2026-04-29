@@ -13,6 +13,10 @@ class Mesh:
         print(self.voxelmap.shape)
         print(self.colormap.shape)
 
+    def translate(self, offset):
+        self.voxelmap[:, :3] += torch.Tensor(offset).to(self.voxelmap.dtype)
+        return self
+
     @staticmethod
     def from_py(path: str):
         spec = importlib.util.spec_from_file_location(

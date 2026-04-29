@@ -83,6 +83,9 @@ class Voxels:
     def from_meshes(meshes: list[Mesh], h: float = 1.0) -> Voxels:
         """Create a Voxels object from a list of meshes"""
 
+        voxel_offset = 0
+        node_offset = 0
+
         # topology accumulators
         global_positions = []
         global_links = []
@@ -159,10 +162,16 @@ class Voxels:
 
             nodes_rest = torch.tensor(unique_node_positions, dtype=torch.float32) * h
 
+            links[links >= 0] += voxel_offset
+            nodes[nodes >= 0] += node_offset
+
             global_positions.append(positions)
             global_links.append(links)
             global_nodes.append(nodes)
             global_nodes_rest.append(nodes_rest)
+
+            voxel_offset += n
+            node_offset += nodes_rest.shape[0]
 
         coords = torch.cat(global_positions, dim=0)
         links = torch.cat(global_links, dim=0)

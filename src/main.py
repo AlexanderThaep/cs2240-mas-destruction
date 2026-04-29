@@ -35,10 +35,8 @@ import window
 # for nid in right_nodes:
 #     mesh.node_pos[nid, 0] += 1.5
 
-mesh = Mesh.from_py("torus_15x5x15.py")
+mesh_0 = Mesh.from_py("torus_15x5x15.py")
+mesh_1 = Mesh.from_py("torus_15x5x15.py").translate([0, 10, 0])
 
-if not mesh:
-    exit(1)
-
-voxels = Voxels.from_meshes([mesh])
+voxels = Voxels.from_meshes([mesh_0, mesh_1])
 window.run(voxels)

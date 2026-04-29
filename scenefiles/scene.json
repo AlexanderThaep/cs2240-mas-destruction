@@ -1,0 +1,14 @@
+{
+    "name": "root",
+    "groups":
+    [
+        {
+            "translate": [0.0, 0.0, 0.0],
+            "mesh": "torus_15x5x15.py"
+        },
+        {
+            "translate": [0.0, 10.0, 0.0],
+            "mesh": "torus_15x5x15.py"
+        }
+    ]
+}

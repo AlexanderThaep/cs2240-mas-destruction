@@ -5,6 +5,7 @@ from OpenGL.GL import *  # pyright: ignore[reportWildcardImportFromLibrary]
 from OpenGL.GLU import * # pyright: ignore[reportWildcardImportFromLibrary]
 
 from voxels import Voxels
+from scene import Scene
 
 class Camera:
     def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0,0,0)):
@@ -50,7 +51,6 @@ def draw_faces(voxels: Voxels, color=(0.6, 0.7, 0.8)):
     """Draw all boundary faces as flat-shaded quads."""
     verts, normals = voxels.boundary_faces()
 
-    verts = voxels.nodes_rest[verts] 
     verts = verts.reshape(-1, 3).cpu().numpy()
     normals = normals.repeat_interleave(4, dim=0).cpu().numpy()
 
@@ -70,7 +70,7 @@ def draw_faces(voxels: Voxels, color=(0.6, 0.7, 0.8)):
 def draw_edges(voxels: Voxels, color=(0.0, 0.0, 0.0)):
     """Draw boundary face edges as wireframe overlay."""
     verts, _ = voxels.boundary_faces()   # (F,4,3)
-    verts = voxels.nodes_rest[verts].cpu()
+    verts = verts.cpu()
 
     # build edge list in tensor form
     v0 = verts[:, 0]
@@ -97,18 +97,24 @@ def draw_edges(voxels: Voxels, color=(0.0, 0.0, 0.0)):
     glDisableClientState(GL_VERTEX_ARRAY)
     glEnable(GL_LIGHTING)
 
-def run(voxels: Voxels, title="simulation", size=(800, 800)):
+def run(scene: Scene, title="simulation", size=(800, 800)):
     pg.init()
     pg.display.set_mode(size, pg.DOUBLEBUF | pg.OPENGL)
     pg.display.set_caption(title)
     init_gl(*size)
 
-    center = voxels.nodes_rest.mean(dim=0).tolist()
-    span   = (voxels.nodes_rest.max() - voxels.nodes_rest.min()).item()
+    center = scene.voxels.node_rest.mean(dim=0).tolist()
+    span   = (scene.voxels.node_rest.max() - scene.voxels.node_rest.min()).item()
     cam    = Camera(distance=span * 1.8, target=center)
 
     clock = pg.time.Clock()
     dragging = False
+
+    M = 0.2
+    V = torch.tensor([0.0, 0.0, 0.0])
+    W = torch.tensor([0.0, 0.0, 0.0])
+    tq = torch.tensor([0.0, 0.8, 0.4])
+    f = torch.tensor([0.0, 0.0, 0.0])
 
     while True:
         for ev in pg.event.get():
@@ -129,9 +135,9 @@ def run(voxels: Voxels, title="simulation", size=(800, 800)):
 
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(1.0, 1.0)
-        draw_faces(voxels)
+        draw_mesh(m)
         glDisable(GL_POLYGON_OFFSET_FILL)
-        draw_edges(voxels)
+        draw_edges(m)
 
         pg.display.flip()
         clock.tick(60)

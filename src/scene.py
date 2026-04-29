@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from voxels import Voxels
+from dataclasses import dataclass
 
 @dataclass
 class Scene:

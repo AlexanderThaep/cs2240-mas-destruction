@@ -1,15 +1,15 @@
-from voxels import VoxelMesh
-import window
+from voxels import Voxels
+from mesh import Mesh
 
-import torus_15x5x15
+import window
 
 # This is just a toy example to see if fracturing is working like we'd expect.
 # Rn it takes a 6x6x6 cube and chops it into two 3x6x6 halves.
 
-mesh = VoxelMesh.cube(side=6, h=1.0)
-mesh = VoxelMesh.from_py(torus_15x5x15, h=1.0)
-print(f"voxels: {mesh.V}   nodes: {mesh.N}")
-print(f"components: {mesh.connected_components().max().item() + 1}")
+# mesh = VoxelMesh.cube(side=6, h=1.0)
+# mesh = VoxelMesh.from_py(torus_15x5x15, h=1.0)
+# print(f"voxels: {mesh.V}   nodes: {mesh.N}")
+# print(f"components: {mesh.connected_components().max().item() + 1}")
 
 # # Break slice to create fracture
 # for v in range(mesh.V):
@@ -35,5 +35,10 @@ print(f"components: {mesh.connected_components().max().item() + 1}")
 # for nid in right_nodes:
 #     mesh.node_pos[nid, 0] += 1.5
 
-# window.run(mesh)
-window.run_scene([mesh])
+mesh = Mesh.from_py("torus_15x5x15.py")
+
+if not mesh:
+    exit(1)
+
+voxels = Voxels.from_meshes([mesh])
+window.run(voxels)

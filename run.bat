@@ -1,3 +1,2 @@
 call env\Scripts\activate
-python src\setup.py
-pause
+python src\main.py

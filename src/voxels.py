@@ -58,14 +58,32 @@ class Voxels:
     voxel_length:  float            # voxel edge length (world units)
 
     # spring-mass system springs
-    # edges_rest:    torch.Tensor   # (E)
-    # edges:         torch.Tensor   # (E,2)
+    edges_rest:    torch.Tensor     # (E)
+    edges:         torch.Tensor     # (E,2)
 
     # simulation state
-    nodes_rest:     torch.Tensor     # (N,3) node positions at rest
-    # nodes_pos:      torch.Tensor   # (N,3) node positions during simulation
-    # nodes_vel:      torch.Tensor   # (N,3) node velocities during simulation
-    # nodes_mass:     torch.Tensor   # (N)
+    nodes_rest:     torch.Tensor    # (N,3) node positions at rest
+    nodes_pos:      torch.Tensor    # (N,3) node positions during simulation
+    # nodes_vel:      torch.Tensor    # (N,3) node velocities during simulation
+    # nodes_mass:     torch.Tensor    # (N)
+
+    @property
+    def V(self) -> int: return self.voxel_coords.shape[0]
+
+    def _build_edges(self):
+        """Deduplicated lattice springs (28 per voxel, many shared)."""
+        V = self.V
+        # (V,28,2) local, expand and gather global
+        s_local = VOXEL_SPRINGS.unsqueeze(0).expand(V, -1, -1)                 # (V,28,2)
+        s_global = torch.gather(
+            self.voxel_nodes.unsqueeze(1).expand(-1, VOXEL_SPRINGS.shape[0], -1),
+            2, s_local
+        )                                                                      # (V,28,2)
+        pairs = s_global.reshape(-1, 2)
+        pairs, _ = pairs.sort(dim=1)                                           # canonicalize
+        self.edges = torch.unique(pairs, dim=0)
+        d = self.node_rest[self.edges[:,1]] - self.node_rest[self.edges[:,0]]
+        self.edges_rest = d.norm(dim=1)
 
     def boundary_faces(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns (face_node_ids, face_normals). Vertex positions are

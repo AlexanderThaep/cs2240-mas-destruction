@@ -45,7 +45,7 @@ class Scene:
 
     def lhs_Ax(self, x: Tensor) -> Tensor:
         """LHS of system Ax = b in Wu et al. [2022, Section 3.1] used in PCG solver."""
-        return self.voxels.node_mass.unsqueeze(-1) * x
+        return self.voxels.nodes_mass.unsqueeze(-1) * x
 
     def rhs_b(self, pos: Tensor) -> Tensor:
         """RHS of system Ax = b in Wu et al. [2022, Section 3.1] used in PCG solver."""

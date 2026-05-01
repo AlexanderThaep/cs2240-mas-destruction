@@ -64,11 +64,25 @@ class Voxels:
     # simulation state
     nodes_rest:     torch.Tensor    # (N,3) node positions at rest
     nodes_pos:      torch.Tensor    # (N,3) node positions during simulation
-    # nodes_vel:      torch.Tensor    # (N,3) node velocities during simulation
-    # nodes_mass:     torch.Tensor    # (N)
+    nodes_vel:      torch.Tensor    # (N,3) node velocities during simulation
+    nodes_mass:     torch.Tensor    # (N)
 
     @property
     def V(self) -> int: return self.voxel_coords.shape[0]
+    @property
+    def N(self) -> int: return self.nodes_rest.shape[0]
+    @property
+    def E(self) -> int: return 0 if self.edges is None else self.edges.shape[0]
+
+    def _init_state(self, density: float = 1.0):
+        """Lump mass at corners; seed pos = rest, vel = 0."""
+        self.nodes_pos = self.nodes_rest.clone()
+        self.nodes_vel = torch.zeros_like(self.nodes_pos)
+        vox_mass = density * (self.voxel_length ** 3)
+        self.nodes_mass = torch.zeros(self.N, dtype=torch.float32)
+        # each voxel distributes mass/8 to each of its 8 corners
+        weights = torch.full((self.V, 8), vox_mass / 8.0)
+        self.nodes_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
 
     def _build_edges(self):
         """Deduplicated lattice springs (28 per voxel, many shared)."""
@@ -82,20 +96,26 @@ class Voxels:
         pairs = s_global.reshape(-1, 2)
         pairs, _ = pairs.sort(dim=1)                                           # canonicalize
         self.edges = torch.unique(pairs, dim=0)
-        d = self.node_rest[self.edges[:,1]] - self.node_rest[self.edges[:,0]]
+        d = self.nodes_rest[self.edges[:,1]] - self.nodes_rest[self.edges[:,0]]
         self.edges_rest = d.norm(dim=1)
 
-    def boundary_faces(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (face_node_ids, face_normals). Vertex positions are
-        self.node_pos[face_node_ids] — the caller chooses rest vs current."""
+    def __init__(
+        self,
+        voxel_coords: torch.Tensor,   # (V,3)
+        voxel_links: torch.Tensor,    # (V,6)
+        voxel_nodes: torch.Tensor,    # (V,8)
+        voxel_length: float,
+        nodes_rest: torch.Tensor      # (N,3)
+    ):
+        self.voxel_coords = voxel_coords
+        self.voxel_links  = voxel_links
+        self.voxel_length = voxel_length
 
-        mask = self.voxel_links == -1
-        voxel_idx, face_idx = mask.nonzero(as_tuple=True)
-        local = FACE_NODES[face_idx]
-        glob  = self.voxel_nodes[voxel_idx]
-        face_nodes = glob.gather(1, local)
-        normals = FACE_NORMALS[face_idx]
-        return face_nodes, normals
+        self.voxel_nodes  = voxel_nodes
+        self.nodes_rest = nodes_rest
+
+        self._build_edges()
+        self._init_state()
 
     @staticmethod
     def from_meshes(meshes: list[Mesh], h: float = 1.0) -> Voxels:
@@ -204,3 +224,14 @@ class Voxels:
             nodes_rest=nodes_rest
         )
             
+    def boundary_faces(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns (face_node_ids, face_normals). Vertex positions are
+        self.node_pos[face_node_ids] — the caller chooses rest vs current."""
+
+        mask = self.voxel_links == -1
+        voxel_idx, face_idx = mask.nonzero(as_tuple=True)
+        local = FACE_NODES[face_idx]
+        glob  = self.voxel_nodes[voxel_idx]
+        face_nodes = glob.gather(1, local)
+        normals = FACE_NORMALS[face_idx]
+        return face_nodes, normals

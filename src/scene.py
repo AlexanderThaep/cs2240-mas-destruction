@@ -2,6 +2,8 @@ import torch
 from torch import Tensor
 from voxels import Voxels
 from dataclasses import dataclass
+from scipy.sparse.linalg import LinearOperator, cg
+import numpy as np
 
 # TODO: add a guard in a single location to ensure that there is >= 1 voxel.
 
@@ -60,3 +62,25 @@ class Scene:
         force = self.internal_forces(pos) + self.external_forces(pos)
         b = (self.dt * M * v) + (self.dt**2 * force)
         return b
+
+    def step(self, pos: Tensor, max_iters: int = 50, tol: float = 1e-5):
+        """Computes a single implicit Euler step using a preconditioned congugate gradient solver."""
+        N = pos.shape[0]
+        self.refresh_edges(pos)
+
+        def matvec(x_flat):
+            x_t = torch.from_numpy(np.ascontiguousarray(x_flat)).reshape(N, 3)
+            return self.lhs_Ax(x_t).reshape(-1).numpy()
+
+        Ax = LinearOperator((3*N, 3*N), matvec=matvec, dtype=np.float32)
+        b  = self.rhs_b(pos).reshape(-1).numpy()
+        x_init = (self.dt * self.voxels.node_vel).reshape(-1).numpy()
+        delta_pos, info = cg(Ax, b, x0=x_init, rtol=tol, maxiter=max_iters)
+
+        if info > 0:
+            # solver didn't converge
+            pass
+
+        delta_pos = torch.from_numpy(delta_pos).reshape(N, 3).clone()
+        self.voxels.node_vel = delta_pos / self.dt
+        return pos + delta_pos

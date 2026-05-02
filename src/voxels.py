@@ -90,10 +90,12 @@ class Voxels:
                 links[i, d] = cmap.get((cx+dx, cy+dy, cz+dz), -1)
 
         scene = Voxels(
-            voxel_coords=coords, links=links, h=h,
+            voxel_coords=coords,
+            voxel_links=links,
             voxel_nodes=torch.empty(0,8,dtype=torch.long),
             node_rest=torch.empty(0,3),
             coords_to_voxel=cmap,
+            h=h
         )
         scene._build_nodes()
         scene._build_edges()
@@ -168,7 +170,7 @@ class Voxels:
         pairs, _ = pairs.sort(dim=1)                # canonicalize
         self.edges = torch.unique(pairs, dim=0)
         d = self.node_rest[self.edges[:,1]] - self.node_rest[self.edges[:,0]]
-        self.edge_rest = d.norm(dim=1)
+        self.edge_lens_rest = d.norm(dim=1)
 
     def init_state(self, density: float = 1.0):
         """Lump mass at corners; seed pos = rest, vel = 0."""

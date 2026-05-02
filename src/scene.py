@@ -23,6 +23,9 @@ class Scene:
     self_collide:    bool  = False  # voxel-voxel inter-component collisions
     self_collide_k:  float = 1e3    # self-collision penalty stiffness
 
+    # fracture
+    tensile_yield:  float = 0.15  # break links beyond this stretch amount
+
     # caches
     edge_lens:  Tensor = None
     edge_dirs:  Tensor = None
@@ -131,6 +134,36 @@ class Scene:
         forces.index_add_(0, edges[:, 1], -force_i)
         return forces
 
+    def fracture(self, pos: Tensor) -> int:
+        """Break face links when stretch exceeds tensile yield (rebuilds voxels)."""
+        links = self.voxels.voxel_links  # (V,6)
+
+        va_all = torch.arange(V).unsqueeze(-1).expand(-1, 6).reshape(-1)  # (6V)
+        vb_all = links.reshape(-1)                                        # (6V)
+        valid  = (vb_all >= 0) & (va_all < vb_all)
+        links  = torch.stack([va_all[valid], vb_all[valid]], dim=-1)      # (L,2)
+
+        if links.numel() == 0:
+            return 0
+
+        nodes = self.voxels.voxel_nodes                                        # (V,8)
+        centroids = pos[nodes].mean(dim=1)                                     # (V,3)
+        dist = (centroids[links[:, 1]] - centroids[links[:, 0]]).norm(dim=-1)  # (L)
+        stretch = (dist - self.voxels.h) / self.voxels.h                       # (L)
+        broken = stretch > self.tensile_yield
+        num_broken = int(broken.sum())
+
+        if num_broken == 0:
+            return 0
+
+        broken_pairs = links[broken]  # (num_broken, 2)
+
+        for va, vb in broken_pairs.tolist():
+            self.voxels.break_link(va, vb)
+
+        self.voxels.rebuild_after_fracture()
+        return num_broken
+
     def lhs_Ax(self, x: Tensor) -> Tensor:
         """LHS of system Ax = b in Wu et al. [2022, Section 3.1] used in PCG solver."""
         Mx = self.voxels.node_mass.unsqueeze(-1) * x              # (N,1)
@@ -173,4 +206,6 @@ class Scene:
 
         delta_pos = torch.from_numpy(delta_pos).reshape(N, 3).clone()
         self.voxels.node_vel = delta_pos / self.dt
-        return pos + delta_pos
+        new_pos = pos + delta_pos
+        self.fracture(new_pos)
+        return new_pos

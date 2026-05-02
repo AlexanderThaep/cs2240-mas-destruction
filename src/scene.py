@@ -17,9 +17,9 @@ class Scene:
     def refresh_edges(self, pos: Tensor):
         edges = self.voxels.edges
         edge_vecs = pos[edges[:, 1]] - pos[edges[:, 0]]
-        edge_lens = edge_vecs.norm(dim=1).clamp(min=1e-10).unsqueeze(-1)
+        edge_lens = edge_vecs.norm(dim=1).clamp(min=1e-10)
         self.edge_lens = edge_lens
-        self.edge_dirs = edge_vecs / edge_lens
+        self.edge_dirs = edge_vecs / edge_lens.unsqueeze(-1)
 
     def external_forces(self, pos: Tensor) -> Tensor:
         """External forces felt by each node"""

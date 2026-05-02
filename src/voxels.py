@@ -1,4 +1,5 @@
 import torch
+from torch import Tensor
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -51,7 +52,7 @@ VOXEL_SPRINGS = torch.tensor([
 ], dtype=torch.long)
 
 
-def _compute_face_pairs() -> torch.Tensor:
+def _compute_face_pairs() -> Tensor:
     """Per-direction (local_a, local_b) corner pairs unified by a face link."""
     pairs = torch.zeros(6, 4, 2, dtype=torch.long)
     for d in range(6):
@@ -71,7 +72,7 @@ def _compute_face_pairs() -> torch.Tensor:
 FACE_PAIRS = _compute_face_pairs()  # (6, 4, 2)
 
 
-def _undirected_components(n: int, src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+def _undirected_components(n: int, src: Tensor, dst: Tensor) -> Tensor:
     """Component labels in [0, C) for an undirected graph on n nodes."""
     if src.numel() == 0:
         return torch.arange(n, dtype=torch.long)
@@ -87,20 +88,20 @@ def _undirected_components(n: int, src: torch.Tensor, dst: torch.Tensor) -> torc
 class Voxels:
     """Voxelized object (V hexahedral elements, N corner nodes, E unique lattice springs)."""
     # topology
-    voxel_coords:    torch.Tensor  # (V,3) integer grid positions
-    voxel_links:     torch.Tensor  # (V,6) neighbor voxel per face, -1=none
-    voxel_nodes:     torch.Tensor  # (V,8) per-voxel node indices
-    h:               float         # voxel edge length (world units)
+    voxel_coords:    Tensor         # (V,3) integer grid positions
+    voxel_links:     Tensor         # (V,6) neighbor voxel per face, -1=none
+    voxel_nodes:     Tensor         # (V,8) per-voxel node indices
+    h:               float          # voxel edge length (world units)
 
     # spring-mass system springs
-    edges:           torch.Tensor = None  # (E,2)
-    edge_lens_rest:  torch.Tensor = None  # (E)
+    edges:           Tensor = None  # (E,2)
+    edge_lens_rest:  Tensor = None  # (E)
 
     # simulation state
-    node_rest:       torch.Tensor = None  # (N,3)
-    node_pos:        torch.Tensor = None  # (N,3)
-    node_vel:        torch.Tensor = None  # (N,3)
-    node_mass:       torch.Tensor = None  # (N)
+    node_rest:       Tensor = None  # (N,3)
+    node_pos:        Tensor = None  # (N,3)
+    node_vel:        Tensor = None  # (N,3)
+    node_mass:       Tensor = None  # (N)
 
     @property
     def V(self) -> int: return self.voxel_coords.shape[0]
@@ -110,10 +111,11 @@ class Voxels:
     def E(self) -> int: return 0 if self.edges is None else self.edges.shape[0]
 
     @staticmethod
-    def from_grid_coords(coords: torch.Tensor, h: float = 1.0) -> "Voxels":
+    def from_grid_coords(coords: Tensor, h: float = 1.0) -> "Voxels":
         """Create a Voxels object from raw grid coordinates."""
         coords = coords.long()
         V = coords.shape[0]
+
         if V == 0:
             return Voxels(
                 voxel_coords=coords,
@@ -125,8 +127,6 @@ class Voxels:
                 h=h,
             )
 
-        # Vectorized link-building: hash each voxel coord to a unique int64 key,
-        # then for each voxel look up its 6 neighbor keys via searchsorted.
         cmin = coords.min(dim=0).values
         cmax = coords.max(dim=0).values
         cshift = coords - cmin + 1  # +1 leaves room for -1 neighbor offset
@@ -156,9 +156,8 @@ class Voxels:
         return voxels
 
     @staticmethod
-    def from_meshes(meshes: List[Mesh], h: float = 1.0) -> Tuple["Voxels", List[torch.Tensor]]:
-        """Combine several Mesh objects into one Voxels grid. Returns the
-        combined Voxels and the per-mesh node indices."""
+    def from_meshes(meshes: List[Mesh], h: float = 1.0) -> Tuple["Voxels", List[Tensor]]:
+        """Combine several Mesh objects into one Voxels grid."""
         coords_list = [m.voxelmap[:, :3].long() for m in meshes]
         bounds = [0]
         for c in coords_list:
@@ -224,6 +223,20 @@ class Voxels:
         d = self.node_rest[self.edges[:,1]] - self.node_rest[self.edges[:,0]]
         self.edge_lens_rest = d.norm(dim=1)
 
+    def voxel_rotations(self, pos: Tensor, indices: Tensor = None) -> Tensor:
+        """Per-voxel rotation matrices."""
+        vn = self.voxel_nodes if indices is None else self.voxel_nodes[indices]  # (K,8)
+        cur = pos[vn]                                                            # (K,8,3)
+        rest = self.node_rest[vn]                                                # (K,8,3)
+        cur_c = cur - cur.mean(dim=1, keepdim=True)
+        rest_c = rest - rest.mean(dim=1, keepdim=True)
+        A = cur_c.transpose(-1, -2) @ rest_c                                     # (K,3,3)
+        U, _, Vh = torch.linalg.svd(A)
+        det_sign = torch.linalg.det(U) * torch.linalg.det(Vh)                    # (K) +/- 1
+        diag = torch.ones_like(A[..., 0])                                        # (K,3)
+        diag[..., 2] = det_sign
+        return (U * diag.unsqueeze(-2)) @ Vh                                     # (K,3,3)
+
     def init_state(self, density: float = 1.0):
         """Lump mass at corners; seed pos = rest, vel = 0."""
         self.node_pos = self.node_rest.clone()
@@ -234,7 +247,7 @@ class Voxels:
         weights = torch.full((self.V, 8), vox_mass / 8.0)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
 
-    def break_links(self, pairs: torch.Tensor):
+    def break_links(self, pairs: Tensor):
         """Sever a batch of voxel-voxel links given as (K,2) pairs."""
         if pairs.numel() == 0:
             return
@@ -280,7 +293,7 @@ class Voxels:
 
         self.node_pos, self.node_vel, self.node_mass = new_pos, new_vel, new_mass
 
-    def connected_components(self) -> torch.Tensor:
+    def connected_components(self) -> Tensor:
         """Returns (V,) component labels in [0..C-1]."""
         V = self.V
         if V == 0:
@@ -290,7 +303,7 @@ class Voxels:
         vb = self.voxel_links[va, d]
         return _undirected_components(V, va, vb)
 
-    def boundary_faces(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def boundary_faces(self) -> Tuple[Tensor, Tensor]:
         """Returns (face_node_ids, face_normals). Vertex positions are
         self.node_pos[face_node_ids] — the caller chooses rest vs current."""
         mask = self.voxel_links == -1
@@ -301,12 +314,12 @@ class Voxels:
         normals = FACE_NORMALS[face_idx]
         return face_nodes, normals
 
-    def boundary_face_voxels(self) -> torch.Tensor:
+    def boundary_face_voxels(self) -> Tensor:
         mask = self.voxel_links == -1
         vi, _ = mask.nonzero(as_tuple=True)
         return vi
 
-    def voxel_centers(self, use_pos: bool = True) -> torch.Tensor:
+    def voxel_centers(self, use_pos: bool = True) -> Tensor:
         """Average of each voxel's 8 corner node positions. (V,3)"""
         src = self.node_pos if (use_pos and self.node_pos is not None) else self.node_rest
         return src[self.voxel_nodes].mean(dim=1)

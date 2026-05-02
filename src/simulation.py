@@ -1,9 +1,8 @@
 import torch
 from torch import Tensor
 from voxels import Voxels
+from morton import morton_code
 from dataclasses import dataclass
-from scipy.sparse.linalg import LinearOperator, cg
-import numpy as np
 
 @dataclass
 class Simulation:
@@ -13,12 +12,9 @@ class Simulation:
     dt:       float                              # Euler approximation timestep
     gravity:  Tensor = Tensor([0.0, -9.8, 0.0])  # downward gravitational acceleration
 
-    # collisions
+    # collisions (resolved by position projection, not penalty forces)
     ground_y:        float = 0.0    # height of ground plane
-    ground_k:        float = 1e4    # ground penalty stiffness
-    ground_c:        float = 2.0    # ground velocity damping
-    self_collide:    bool  = False  # voxel-voxel inter-component collisions
-    self_collide_k:  float = 1e3    # self-collision penalty stiffness
+    self_collide:    bool  = True   # voxel-voxel inter-component collisions
 
     # fracture
     tensile_yield:  float = 0.15  # break links beyond this stretch amount
@@ -29,6 +25,7 @@ class Simulation:
 
     def __post_init__(self):
         assert self.voxels.V >= 1, "Simulation requires at least one voxel"
+        assert self.voxels.node_pos is not None, "Call voxels.init_state() before constructing Simulation"
 
     def refresh_edges(self, pos: Tensor):
         edges = self.voxels.edges
@@ -36,15 +33,6 @@ class Simulation:
         edge_lens = edge_vecs.norm(dim=1).clamp(min=1e-10)
         self.edge_lens = edge_lens
         self.edge_dirs = edge_vecs / edge_lens.unsqueeze(-1)
-
-    def ground_forces(self, pos: Tensor) -> Tensor:
-        """Normal force felt by nodes hitting the ground."""
-        penalty = (self.ground_y - pos[:, 1]).clamp(min=0.0)                    # (N)
-        in_contact = penalty > 0                                                # (N)
-        node_vel_down = self.voxels.node_vel[:, 1].clamp(max=0.0) * in_contact  # (N)
-        force = torch.zeros_like(pos)                                           # (N,3)
-        force[:, 1] = self.ground_k * penalty - self.ground_c * node_vel_down   # (N)
-        return force
 
     def collision_candidates(self, pos: Tensor) -> tuple[Tensor, Tensor]:
         """Returns candidate voxel pairs that could be colliding based on spatial locality."""
@@ -82,45 +70,51 @@ class Simulation:
         keep = a < b
         return a[keep], b[keep]
 
-    def collision_forces(self, pos: Tensor) -> Tensor:
-        """Collision force felt by voxels hitting other voxels."""
+    def project_ground(self, pos: Tensor) -> Tensor:
+        """Clamp nodes above the ground plane."""
+        new_pos = pos.clone()
+        new_pos[:, 1] = pos[:, 1].clamp(min=self.ground_y)
+        return new_pos
+
+    def project_collisions(self, pos: Tensor) -> Tensor:
+        """Push apart overlapping voxels from different components (PBD-style)."""
         h = self.voxels.h
         nodes = self.voxels.voxel_nodes
         a, b = self.collision_candidates(pos)
-
         if a.numel() == 0:
-            return torch.zeros_like(pos)
+            return pos
 
         components = self.voxels.connected_components()
         cross = components[a] != components[b]
         a, b = a[cross], b[cross]
-
         if a.numel() == 0:
-            return torch.zeros_like(pos)
+            return pos
 
-        # Actual centroid distance for each candidate pair
-        centroids = pos[nodes].mean(dim=1)         # (V,3)
-        diff = centroids[b] - centroids[a]         # (K,3)
-        dist = diff.norm(dim=-1).clamp(min=1e-10)  # (K)
-        penalty = (h - dist).clamp(min=0.0)        # (K)
-        contact = penalty > 0
-
+        centroids = pos[nodes].mean(dim=1)
+        diff = centroids[b] - centroids[a]
+        dist = diff.norm(dim=-1).clamp(min=1e-10)
+        overlap = (h - dist).clamp(min=0.0)
+        contact = overlap > 0
         if not contact.any():
-            return torch.zeros_like(pos)
+            return pos
 
-        a, b, penalty, dist, diff = a[contact], b[contact], penalty[contact], dist[contact], diff[contact]
-        voxel_push = (self.self_collide_k * penalty / dist).unsqueeze(-1) * diff  # (K,3) on b from a
-        node_push = (voxel_push / 8.0).repeat_interleave(8, dim=0)                # (8K, 3)
-        force = torch.zeros_like(pos)
-        force.index_add_(0, nodes[b].reshape(-1),  node_push)
-        force.index_add_(0, nodes[a].reshape(-1), -node_push)
-        return force
+        a, b, overlap, dist, diff = a[contact], b[contact], overlap[contact], dist[contact], diff[contact]
+        push = (overlap / 2).unsqueeze(-1) * (diff / dist.unsqueeze(-1))   # (K,3) a -> b/2
+
+        correction = torch.zeros_like(pos)
+        count      = torch.zeros(pos.shape[0])
+        K = a.shape[0]
+        push_corners = push.repeat_interleave(8, dim=0)
+        ones_corners = torch.ones(K * 8)
+        correction.index_add_(0, nodes[b].reshape(-1),  push_corners)
+        correction.index_add_(0, nodes[a].reshape(-1), -push_corners)
+        count.index_add_(0, nodes[b].reshape(-1), ones_corners)
+        count.index_add_(0, nodes[a].reshape(-1), ones_corners)
+        return pos + correction / count.clamp(min=1).unsqueeze(-1)
 
     def external_forces(self, pos: Tensor) -> Tensor:
-        """External forces felt by each node (gravity and collisions)"""
-        gravity = self.voxels.node_mass.unsqueeze(-1) * self.gravity.unsqueeze(0)
-        forces = gravity + self.ground_forces(pos) + self.collision_forces(pos)
-        return forces
+        """External forces felt by each node (gravity only; contacts are projected)."""
+        return self.voxels.node_mass.unsqueeze(-1) * self.gravity.unsqueeze(0)
 
     def internal_forces(self, pos: Tensor) -> Tensor:
         """Internal spring forces felt by each node (sum over Hooke's Law spring forces)."""
@@ -134,14 +128,15 @@ class Simulation:
         forces.index_add_(0, edges[:, 1], -force_i)
         return forces
 
-    def fracture(self, pos: Tensor) -> int:
+    def fracture(self) -> int:
         """Break face links when stretch exceeds tensile yield (rebuilds voxels)."""
-        links = self.voxels.voxel_links  # (V,6)
+        pos = self.voxels.node_pos
+        all_links = self.voxels.voxel_links  # (V,6)
 
         va_all = torch.arange(self.voxels.V).unsqueeze(-1).expand(-1, 6).reshape(-1)  # (6V)
-        vb_all = links.reshape(-1)                                        # (6V)
+        vb_all = all_links.reshape(-1)                                                # (6V)
         valid  = (vb_all >= 0) & (va_all < vb_all)
-        links  = torch.stack([va_all[valid], vb_all[valid]], dim=-1)      # (L,2)
+        links  = torch.stack([va_all[valid], vb_all[valid]], dim=-1)                  # (L,2)
 
         if links.numel() == 0:
             return 0
@@ -156,12 +151,10 @@ class Simulation:
         if num_broken == 0:
             return 0
 
-        broken_pairs = links[broken]  # (num_broken, 2)
-
-        for va, vb in broken_pairs.tolist():
-            self.voxels.break_link(va, vb)
-
+        self.voxels.break_links(links[broken])
         self.voxels.rebuild_after_fracture()
+        self.edge_lens = None  # invalidate caches; sized to old voxels.E
+        self.edge_dirs = None
         return num_broken
 
     def lhs_Ax(self, x: Tensor) -> Tensor:
@@ -186,26 +179,39 @@ class Simulation:
         b = (self.dt * M * v) + (self.dt**2 * force)
         return b
 
-    def step(self, pos: Tensor, max_iters: int = 50, tol: float = 1e-5):
+    def _cg(self, b: Tensor, x0: Tensor, max_iters: int, tol: float) -> Tensor:
+        """Conjugate gradient solve x ~= A^-1 b for the SPD operator self.lhs_Ax."""
+        b_norm_sq = (b * b).sum()
+        if b_norm_sq < 1e-30:
+            return torch.zeros_like(x0)  # A is SPD, so b=0 implies x=0 exactly
+        b_norm = b_norm_sq.sqrt()
+
+        x = x0.clone()
+        r = b - self.lhs_Ax(x)
+        p = r.clone()
+        rs = (r * r).sum()
+        for _ in range(max_iters):
+            Ap = self.lhs_Ax(p)
+            alpha = rs / (p * Ap).sum().clamp(min=1e-30)
+            x = x + alpha * p
+            r = r - alpha * Ap
+            rs_new = (r * r).sum()
+            if (rs_new.sqrt() / b_norm) < tol:
+                break
+            p = r + (rs_new / rs) * p
+            rs = rs_new
+        return x
+
+    def step(self, max_iters: int = 50, tol: float = 1e-5) -> int:
         """Computes a single implicit Euler step using a preconditioned congugate gradient solver."""
-        N = pos.shape[0]
+        pos = self.voxels.node_pos
         self.refresh_edges(pos)
-
-        def matvec(x_flat):
-            x_t = torch.from_numpy(np.ascontiguousarray(x_flat)).reshape(N, 3)
-            return self.lhs_Ax(x_t).reshape(-1).numpy()
-
-        Ax = LinearOperator((3*N, 3*N), matvec=matvec, dtype=np.float32)
-        b  = self.rhs_b(pos).reshape(-1).numpy()
-        x_init = (self.dt * self.voxels.node_vel).reshape(-1).numpy()
-        delta_pos, info = cg(Ax, b, x0=x_init, rtol=tol, maxiter=max_iters)
-
-        if info > 0:
-            # solver didn't converge
-            pass
-
-        delta_pos = torch.from_numpy(delta_pos).reshape(N, 3).clone()
-        self.voxels.node_vel = delta_pos / self.dt
-        new_pos = pos + delta_pos
-        self.fracture(new_pos)
-        return new_pos
+        b  = self.rhs_b(pos)
+        x0 = self.dt * self.voxels.node_vel
+        new_pos = pos + self._cg(b, x0, max_iters, tol)
+        if self.self_collide:
+            new_pos = self.project_collisions(new_pos)
+        new_pos = self.project_ground(new_pos)
+        self.voxels.node_vel = (new_pos - pos) / self.dt
+        self.voxels.node_pos = new_pos
+        return self.fracture()

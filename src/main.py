@@ -1,42 +1,38 @@
-from voxels import Voxels
-from mesh import Mesh
+import torch
 
+from mesh import Mesh
+from voxels import Voxels
+from simulation import Simulation
 import window
 
-# This is just a toy example to see if fracturing is working like we'd expect.
-# Rn it takes a 6x6x6 cube and chops it into two 3x6x6 halves.
+# Two knights charging at each other.
+left  = Mesh.from_vox("../objects/character/chr_knight.vox")
+right = Mesh.from_vox("../objects/character/chr_knight.vox").translate([40, 0, 0])
 
-# mesh = VoxelMesh.cube(side=6, h=1.0)
-# mesh = VoxelMesh.from_py(torus_15x5x15, h=1.0)
-# print(f"voxels: {mesh.V}   nodes: {mesh.N}")
-# print(f"components: {mesh.connected_components().max().item() + 1}")
+voxels, (left_nodes, right_nodes) = Voxels.from_meshes([left, right], h=1.0)
+voxels.init_state(density=1.0)
 
-# # Break slice to create fracture
-# for v in range(mesh.V):
-#     gx = mesh.voxel_coords[v, 0].item()
-#     for d in range(6):
-#         j = mesh.links[v, d].item()
-#         if j < 0:
-#             continue
-#         gx_j = mesh.voxel_coords[j, 0].item()
-#         # Sever all links crossing the x=3 plane
-#         if (gx < 3 and gx_j >= 3) or (gx >= 3 and gx_j < 3):
-#             mesh.break_link(v, j)
+voxels.node_vel[left_nodes]  = torch.tensor([ 10.0, 0.0, 0.0])
+voxels.node_vel[right_nodes] = torch.tensor([-10.0, 0.0, 0.0])
 
-# mesh.rebuild_after_fracture()
-# print(f"after fracture — nodes: {mesh.N}")
-# print(f"components: {mesh.connected_components().max().item() + 1}")
+sim = Simulation(
+    voxels        = voxels,
+    k             = 1e3,
+    dt            = 1/60,
+    ground_y      = 0.0,
+    self_collide  = True,
+    tensile_yield = 0.15,
+)
 
-# # Nudge right half so split is visible
-# right_nodes = set()
-# for v in range(mesh.V):
-#     if mesh.voxel_coords[v, 0].item() >= 3:
-#         right_nodes.update(mesh.voxel_nodes[v].tolist())
-# for nid in right_nodes:
-#     mesh.node_pos[nid, 0] += 1.5
+print(f"V={voxels.V}  N={voxels.N}  E={voxels.E}")
+window.run(sim, title="knight vs knight")
 
-mesh_0 = Mesh.from_py("torus_15x5x15.py")
-mesh_1 = Mesh.from_py("torus_15x5x15.py").translate([0, 10, 0])
-
-voxels = Voxels.from_meshes([mesh_0, mesh_1])
-window.run(voxels)
+# Target scene (slower: ~9s build, ~0.9s/step on the combined 319k-voxel scene).
+# castle     = Mesh.from_vox("../objects/monument/monu7.vox")
+# projectile = Mesh.from_vox("../objects/monument/monu5.vox").translate([200, 60, 0])
+# voxels, (castle_nodes, proj_nodes) = Voxels.from_meshes([castle, projectile], h=1.0)
+# voxels.init_state(density=1.0)
+# voxels.node_vel[proj_nodes] = torch.tensor([-100.0, 0.0, 0.0])
+# sim = Simulation(voxels=voxels, k=1e3, dt=1/60, ground_y=0.0,
+#                  self_collide=True, tensile_yield=0.15)
+# window.run(sim, title="monu5 -> monu7")

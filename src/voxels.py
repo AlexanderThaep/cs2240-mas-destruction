@@ -1,6 +1,11 @@
 import torch
-from dataclasses import dataclass, field
-from typing import Dict, Tuple
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Tuple
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components as scipy_cc
+
+from mesh import Mesh
 
 # 8 node offsets from a voxel's grid origin (y-up convention).
 # Nodes 0-3 are bottom (y=0), 4-7 are top (y=1).
@@ -26,7 +31,9 @@ FACE_NORMALS = torch.tensor([
     [-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1],
 ], dtype=torch.float32)
 
-NEIGHBOR_OFFSETS = [(-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)]
+NEIGHBOR_OFFSETS = torch.tensor([
+    [-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1],
+], dtype=torch.long)
 
 # 28 lattice springs per voxel.
 # 12 edges + 12 face diagonals + 4 body diagonals.
@@ -44,6 +51,38 @@ VOXEL_SPRINGS = torch.tensor([
 ], dtype=torch.long)
 
 
+def _compute_face_pairs() -> torch.Tensor:
+    """Per-direction (local_a, local_b) corner pairs unified by a face link."""
+    pairs = torch.zeros(6, 4, 2, dtype=torch.long)
+    for d in range(6):
+        opposite = d ^ 1  # 0<->1, 2<->3, 4<->5
+        a_locals = FACE_NODES[d]
+        b_locals = FACE_NODES[opposite]
+        a_world = NODE_OFFSETS[a_locals]
+        b_world = NODE_OFFSETS[b_locals] + NEIGHBOR_OFFSETS[d]
+        for i in range(4):
+            for j in range(4):
+                if torch.equal(a_world[i], b_world[j]):
+                    pairs[d, i, 0] = a_locals[i]
+                    pairs[d, i, 1] = b_locals[j]
+                    break
+    return pairs
+
+FACE_PAIRS = _compute_face_pairs()  # (6, 4, 2)
+
+
+def _undirected_components(n: int, src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+    """Component labels in [0, C) for an undirected graph on n nodes."""
+    if src.numel() == 0:
+        return torch.arange(n, dtype=torch.long)
+    rows = np.concatenate([src.numpy(), dst.numpy()])
+    cols = np.concatenate([dst.numpy(), src.numpy()])
+    data = np.ones(rows.shape[0], dtype=np.int8)
+    adj = csr_matrix((data, (rows, cols)), shape=(n, n))
+    _, labels = scipy_cc(adj, directed=False, return_labels=True)
+    return torch.from_numpy(labels.astype(np.int64))
+
+
 @dataclass
 class Voxels:
     """Voxelized object (V hexahedral elements, N corner nodes, E unique lattice springs)."""
@@ -52,9 +91,6 @@ class Voxels:
     voxel_links:     torch.Tensor  # (V,6) neighbor voxel per face, -1=none
     voxel_nodes:     torch.Tensor  # (V,8) per-voxel node indices
     h:               float         # voxel edge length (world units)
-
-    # dictionary for lookup
-    coords_to_voxel: Dict[Tuple[int,int,int], int] = field(default_factory=dict, repr=False)
 
     # spring-mass system springs
     edges:           torch.Tensor = None  # (E,2)
@@ -78,89 +114,105 @@ class Voxels:
         """Create a Voxels object from raw grid coordinates."""
         coords = coords.long()
         V = coords.shape[0]
+        if V == 0:
+            return Voxels(
+                voxel_coords=coords,
+                voxel_links=torch.empty(0, 6, dtype=torch.long),
+                voxel_nodes=torch.empty(0, 8, dtype=torch.long),
+                node_rest=torch.empty(0, 3),
+                edges=torch.empty(0, 2, dtype=torch.long),
+                edge_lens_rest=torch.empty(0),
+                h=h,
+            )
 
-        cmap: Dict[Tuple[int,int,int], int] = {}
-        for i in range(V):
-            cmap[(coords[i,0].item(), coords[i,1].item(), coords[i,2].item())] = i
+        # Vectorized link-building: hash each voxel coord to a unique int64 key,
+        # then for each voxel look up its 6 neighbor keys via searchsorted.
+        cmin = coords.min(dim=0).values
+        cmax = coords.max(dim=0).values
+        cshift = coords - cmin + 1  # +1 leaves room for -1 neighbor offset
+        extent = (cmax - cmin + 3).long()
+        s_yz = extent[1] * extent[2]
+        s_z  = extent[2]
 
-        links = torch.full((V, 6), -1, dtype=torch.long)
-        for i in range(V):
-            cx, cy, cz = coords[i].tolist()
-            for d, (dx, dy, dz) in enumerate(NEIGHBOR_OFFSETS):
-                links[i, d] = cmap.get((cx+dx, cy+dy, cz+dz), -1)
+        keys = cshift[:, 0] * s_yz + cshift[:, 1] * s_z + cshift[:, 2]  # (V,)
+        sort_idx = keys.argsort()
+        sorted_keys = keys[sort_idx]
 
-        scene = Voxels(
+        nbr = cshift.unsqueeze(1) + NEIGHBOR_OFFSETS.unsqueeze(0)        # (V,6,3)
+        nbr_keys = (nbr[..., 0] * s_yz + nbr[..., 1] * s_z + nbr[..., 2]).reshape(-1)
+        lo = torch.searchsorted(sorted_keys, nbr_keys).clamp(max=V-1)
+        hit = sorted_keys[lo] == nbr_keys
+        links = torch.where(hit, sort_idx[lo], torch.tensor(-1, dtype=torch.long)).reshape(V, 6)
+
+        voxels = Voxels(
             voxel_coords=coords,
             voxel_links=links,
-            voxel_nodes=torch.empty(0,8,dtype=torch.long),
-            node_rest=torch.empty(0,3),
-            coords_to_voxel=cmap,
-            h=h
+            voxel_nodes=torch.empty(0, 8, dtype=torch.long),
+            node_rest=torch.empty(0, 3),
+            h=h,
         )
-        scene._build_nodes()
-        scene._build_edges()
-        return scene
+        voxels._build_nodes()
+        voxels._build_edges()
+        return voxels
+
+    @staticmethod
+    def from_meshes(meshes: List[Mesh], h: float = 1.0) -> Tuple["Voxels", List[torch.Tensor]]:
+        """Combine several Mesh objects into one Voxels grid. Returns the
+        combined Voxels and the per-mesh node indices."""
+        coords_list = [m.voxelmap[:, :3].long() for m in meshes]
+        bounds = [0]
+        for c in coords_list:
+            bounds.append(bounds[-1] + c.shape[0])
+        coords = torch.cat(coords_list, dim=0)
+        voxels = Voxels.from_grid_coords(coords, h=h)
+
+        node_groups = [
+            voxels.voxel_nodes[bounds[i]:bounds[i+1]].reshape(-1).unique()
+            for i in range(len(meshes))
+        ]
+        return voxels, node_groups
 
     def _build_nodes(self):
         """Two voxels sharing a corner position share a node only if they are
         linked (directly or transitively at that corner). Breaking a link
         therefore duplicates the shared nodes along the fracture surface."""
         V = self.V
-        node_positions = self.voxel_coords.unsqueeze(1) + NODE_OFFSETS.unsqueeze(0)  # (V,8,3)
+        if V == 0:
+            self.node_rest = torch.empty(0, 3)
+            self.voxel_nodes = torch.empty(0, 8, dtype=torch.long)
+            return
 
-        pos_to_nodes: Dict[Tuple[int,int,int], list] = {}
-        for v in range(V):
-            for n in range(8):
-                key = (node_positions[v,n,0].item(),
-                       node_positions[v,n,1].item(),
-                       node_positions[v,n,2].item())
-                pos_to_nodes.setdefault(key, []).append((v, n))
+        valid = self.voxel_links >= 0
+        va, d = valid.nonzero(as_tuple=True)
+        vb = self.voxel_links[va, d]
+        keep = va < vb  # process each undirected link once
+        va, d, vb = va[keep], d[keep], vb[keep]
 
-        voxel_nodes = torch.zeros(V, 8, dtype=torch.long)
-        unique_node_positions: list = []
-        node_idx = 0
+        merge = FACE_PAIRS[d]                                           # (L,4,2)
+        ids_a = (va.unsqueeze(-1) * 8 + merge[..., 0]).reshape(-1)      # (4L,)
+        ids_b = (vb.unsqueeze(-1) * 8 + merge[..., 1]).reshape(-1)      # (4L,)
 
-        for pos, nodes_at_pos in pos_to_nodes.items():
-            voxels_at_pos = {v for v, _ in nodes_at_pos}
+        labels = _undirected_components(V * 8, ids_a, ids_b)            # (8V,)
+        self.voxel_nodes = labels.reshape(V, 8)
 
-            parent = {v: v for v in voxels_at_pos}
-            def find(x):
-                while parent[x] != x:
-                    parent[x] = parent[parent[x]]
-                    x = parent[x]
-                return x
-
-            if len(voxels_at_pos) == 1:
-                for v, n in nodes_at_pos:
-                    voxel_nodes[v, n] = node_idx
-                unique_node_positions.append(pos)
-                node_idx += 1
-                continue
-
-            for va in voxels_at_pos:
-                for i in range(6):
-                    vb = self.voxel_links[va, i].item()
-                    if vb in voxels_at_pos:
-                        ra, rb = find(va), find(vb)
-                        if ra != rb:
-                            parent[rb] = ra
-
-            group_node_idx: Dict[int, int] = {}
-            for v, n in nodes_at_pos:
-                root = find(v)
-                if root not in group_node_idx:
-                    group_node_idx[root] = node_idx
-                    unique_node_positions.append(pos)
-                    node_idx += 1
-                voxel_nodes[v, n] = group_node_idx[root]
-
-        self.node_rest = torch.tensor(unique_node_positions, dtype=torch.float32) * self.h
-        self.voxel_nodes = voxel_nodes
+        # World position per (v, local_n); take the first occurrence per label as canonical
+        node_world = (self.voxel_coords.unsqueeze(1) + NODE_OFFSETS.unsqueeze(0)).reshape(V*8, 3)
+        labels_np = labels.numpy()
+        sort_idx = labels_np.argsort(kind="stable")
+        sorted_labels = labels_np[sort_idx]
+        first = np.empty_like(sorted_labels, dtype=bool)
+        first[0] = True
+        first[1:] = sorted_labels[1:] != sorted_labels[:-1]
+        rep_indices = sort_idx[first]                                   # one rep per label
+        self.node_rest = node_world[torch.from_numpy(rep_indices)].float() * self.h
 
     def _build_edges(self):
         """Deduplicated lattice springs (28 per voxel, many shared)."""
         V = self.V
-        # (V,28,2) local, expand and gather global
+        if V == 0:
+            self.edges = torch.empty(0, 2, dtype=torch.long)
+            self.edge_lens_rest = torch.empty(0)
+            return
         s_local = VOXEL_SPRINGS.unsqueeze(0).expand(V, -1, -1)                 # (V,28,2)
         s_global = torch.gather(
             self.voxel_nodes.unsqueeze(1).expand(-1, VOXEL_SPRINGS.shape[0], -1),
@@ -182,15 +234,20 @@ class Voxels:
         weights = torch.full((self.V, 8), vox_mass / 8.0)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
 
-    def break_link(self, va: int, vb: int):
-        for d in range(6):
-            if self.voxel_links[va, d].item() == vb:
-                self.voxel_links[va, d] = -1
-            if self.voxel_links[vb, d].item() == va:
-                self.voxel_links[vb, d] = -1
+    def break_links(self, pairs: torch.Tensor):
+        """Sever a batch of voxel-voxel links given as (K,2) pairs."""
+        if pairs.numel() == 0:
+            return
+        va, vb = pairs[:, 0], pairs[:, 1]
+        match_a = self.voxel_links[va] == vb.unsqueeze(-1)  # (K,6)
+        match_b = self.voxel_links[vb] == va.unsqueeze(-1)  # (K,6)
+        k_a, d_a = match_a.nonzero(as_tuple=True)
+        k_b, d_b = match_b.nonzero(as_tuple=True)
+        self.voxel_links[va[k_a], d_a] = -1
+        self.voxel_links[vb[k_b], d_b] = -1
 
     def rebuild_after_fracture(self):
-        """Rebuild node/edge arrays after break_link calls, carrying forward
+        """Rebuild node/edge arrays after break_links calls, carrying forward
         per-node state (pos, vel, mass) by copying from the old parent node
         to each of its new duplicates."""
         if self.node_pos is None:
@@ -206,50 +263,32 @@ class Voxels:
         self._build_nodes()
         self._build_edges()
 
-        # For every new node, find an old node at the same grid position and
-        # copy its state. If a node was split (one old -> multiple new), all
-        # children inherit the parent's pos/vel; mass is redistributed by the
-        # number of voxels now touching each new node.
         new_pos  = torch.zeros(self.N, 3, dtype=torch.float32)
         new_vel  = torch.zeros(self.N, 3, dtype=torch.float32)
         new_mass = torch.zeros(self.N, dtype=torch.float32)
-        count    = torch.zeros(self.N, dtype=torch.long)
 
-        for v in range(self.V):
-            for n in range(8):
-                new_id = self.voxel_nodes[v, n].item()
-                old_id = old_voxel_nodes[v, n].item()
-                if count[new_id] == 0:
-                    new_pos[new_id] = old_pos[old_id]
-                    new_vel[new_id] = old_vel[old_id]
-                count[new_id] += 1
+        # Bulk-copy: all (v,n) sharing a new node id share the same world pos.
+        new_flat = self.voxel_nodes.reshape(-1)
+        old_flat = old_voxel_nodes.reshape(-1)
+        new_pos[new_flat] = old_pos[old_flat]
+        new_vel[new_flat] = old_vel[old_flat]
 
         # Recompute per-node masses from scratch using current voxel membership.
         vox_mass = old_mass.sum() / max(self.V, 1)
         weights = torch.full((self.V, 8), vox_mass / 8.0)
-        new_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
+        new_mass.index_add_(0, new_flat, weights.reshape(-1))
 
         self.node_pos, self.node_vel, self.node_mass = new_pos, new_vel, new_mass
 
     def connected_components(self) -> torch.Tensor:
         """Returns (V,) component labels in [0..C-1]."""
         V = self.V
-        parent = list(range(V))
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-        for i in range(V):
-            for d in range(6):
-                j = self.voxel_links[i, d].item()
-                if j >= 0:
-                    ri, rj = find(i), find(j)
-                    if ri != rj:
-                        parent[rj] = ri
-        labels = torch.tensor([find(i) for i in range(V)], dtype=torch.long)
-        _, labels = torch.unique(labels, return_inverse=True)
-        return labels
+        if V == 0:
+            return torch.empty(0, dtype=torch.long)
+        valid = self.voxel_links >= 0
+        va, d = valid.nonzero(as_tuple=True)
+        vb = self.voxel_links[va, d]
+        return _undirected_components(V, va, vb)
 
     def boundary_faces(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns (face_node_ids, face_normals). Vertex positions are

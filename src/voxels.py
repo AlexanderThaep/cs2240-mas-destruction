@@ -47,24 +47,24 @@ VOXEL_SPRINGS = torch.tensor([
 @dataclass
 class Voxels:
     """Voxelized object (V hexahedral elements, N corner nodes, E unique lattice springs)."""
-    # --- topology ---
-    voxel_coords:  torch.Tensor   # (V,3) integer grid positions
-    voxel_links:   torch.Tensor   # (V,6) neighbor voxel per face, -1=none
-    voxel_nodes:   torch.Tensor   # (V,8) per-voxel node indices
-    h:             float          # voxel edge length (world units)
+    # topology
+    voxel_coords:    torch.Tensor  # (V,3) integer grid positions
+    voxel_links:     torch.Tensor  # (V,6) neighbor voxel per face, -1=none
+    voxel_nodes:     torch.Tensor  # (V,8) per-voxel node indices
+    h:               float         # voxel edge length (world units)
 
-    # --- dictionary for lookup ---
+    # dictionary for lookup
     coords_to_voxel: Dict[Tuple[int,int,int], int] = field(default_factory=dict, repr=False)
 
-    # --- spring-mass system springs ---
-    edges:         torch.Tensor = None   # (E,2)
-    edge_rest:     torch.Tensor = None   # (E)
+    # spring-mass system springs
+    edges:           torch.Tensor = None  # (E,2)
+    edge_lens_rest:  torch.Tensor = None  # (E)
 
-    # --- simulation state ---
-    node_rest:     torch.Tensor = None   # (N,3)
-    node_pos:      torch.Tensor = None   # (N,3)
-    node_vel:      torch.Tensor = None   # (N,3)
-    node_mass:     torch.Tensor = None   # (N)
+    # simulation state
+    node_rest:       torch.Tensor = None  # (N,3)
+    node_pos:        torch.Tensor = None  # (N,3)
+    node_vel:        torch.Tensor = None  # (N,3)
+    node_mass:       torch.Tensor = None  # (N)
 
     @property
     def V(self) -> int: return self.voxel_coords.shape[0]

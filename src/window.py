@@ -4,7 +4,7 @@ from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
 
-from voxels import VoxelScene
+from voxels import Voxels
 from physics import Physics
 from fracture import break_yielded_links
 from collision import ground_collision_forces, voxel_voxel_collision_forces
@@ -52,7 +52,7 @@ def _init_gl(width, height):
     glMatrixMode(GL_MODELVIEW)
 
 
-def _draw_scene(scene: VoxelScene, color=(0.6, 0.7, 0.8)):
+def _draw_scene(scene: Voxels, color=(0.6, 0.7, 0.8)):
     face_nodes, normals = scene.boundary_faces()
     if face_nodes.shape[0] == 0:
         return
@@ -69,7 +69,7 @@ def _draw_scene(scene: VoxelScene, color=(0.6, 0.7, 0.8)):
     glDisableClientState(GL_NORMAL_ARRAY)
 
 
-def _draw_edges(scene: VoxelScene, color=(0.0, 0.0, 0.0)):
+def _draw_edges(scene: Voxels, color=(0.0, 0.0, 0.0)):
     face_nodes, _ = scene.boundary_faces()
     if face_nodes.shape[0] == 0:
         return

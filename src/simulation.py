@@ -5,13 +5,10 @@ from dataclasses import dataclass
 from scipy.sparse.linalg import LinearOperator, cg
 import numpy as np
 
-# TODO: add a guard in a single location to ensure that there is >= 1 voxel.
-# TODO: rename Scene to Simulation (and use 'sim' instead of scene)
-
 @dataclass
-class Scene:
+class Simulation:
     # simulation parameters
-    voxels:   Voxels                             # voxels in scene
+    voxels:   Voxels                             # voxels in sim
     k:        float                              # spring constant (stiffness)
     dt:       float                              # Euler approximation timestep
     gravity:  Tensor = Tensor([0.0, -9.8, 0.0])  # downward gravitational acceleration
@@ -29,6 +26,9 @@ class Scene:
     # caches
     edge_lens:  Tensor = None
     edge_dirs:  Tensor = None
+
+    def __post_init__(self):
+        assert self.voxels.V >= 1, "Simulation requires at least one voxel"
 
     def refresh_edges(self, pos: Tensor):
         edges = self.voxels.edges
@@ -138,7 +138,7 @@ class Scene:
         """Break face links when stretch exceeds tensile yield (rebuilds voxels)."""
         links = self.voxels.voxel_links  # (V,6)
 
-        va_all = torch.arange(V).unsqueeze(-1).expand(-1, 6).reshape(-1)  # (6V)
+        va_all = torch.arange(self.voxels.V).unsqueeze(-1).expand(-1, 6).reshape(-1)  # (6V)
         vb_all = links.reshape(-1)                                        # (6V)
         valid  = (vb_all >= 0) & (va_all < vb_all)
         links  = torch.stack([va_all[valid], vb_all[valid]], dim=-1)      # (L,2)

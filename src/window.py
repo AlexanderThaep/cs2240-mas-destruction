@@ -1,15 +1,19 @@
 import torch
-
 import pygame as pg
-from OpenGL.GL import *  # pyright: ignore[reportWildcardImportFromLibrary]
-from OpenGL.GLU import * # pyright: ignore[reportWildcardImportFromLibrary]
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GLU import *
 
-from voxels import Voxels
+from voxels import VoxelScene
+from physics import Physics
+from fracture import break_yielded_links
+from collision import ground_collision_forces, voxel_voxel_collision_forces
+
 
 class Camera:
-    def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0,0,0)):
+    def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0, 0, 0)):
         self.distance = distance
-        self.yaw   = yaw
+        self.yaw = yaw
         self.pitch = pitch
         self.target = list(target)
 
@@ -29,7 +33,8 @@ class Camera:
         self.distance *= 0.9 if delta > 0 else 1.1
         self.distance = max(1.0, self.distance)
 
-def init_gl(width, height):
+
+def _init_gl(width, height):
     glEnable(GL_DEPTH_TEST)
     glEnable(GL_LIGHTING)
     glEnable(GL_LIGHT0)
@@ -46,92 +51,102 @@ def init_gl(width, height):
     gluPerspective(45, width / height, 0.1, 500.0)
     glMatrixMode(GL_MODELVIEW)
 
-def draw_faces(voxels: Voxels, color=(0.6, 0.7, 0.8)):
-    """Draw all boundary faces as flat-shaded quads."""
-    verts, normals = voxels.boundary_faces()
 
-    verts = voxels.nodes_rest[verts] 
-    verts = verts.reshape(-1, 3).cpu().numpy()
+def _draw_scene(scene: VoxelScene, color=(0.6, 0.7, 0.8)):
+    face_nodes, normals = scene.boundary_faces()
+    if face_nodes.shape[0] == 0:
+        return
+    verts = scene.node_pos[face_nodes].reshape(-1, 3).cpu().numpy()
     normals = normals.repeat_interleave(4, dim=0).cpu().numpy()
 
     glColor3f(*color)
-
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_NORMAL_ARRAY)
-
     glVertexPointer(3, GL_FLOAT, 0, verts)
     glNormalPointer(GL_FLOAT, 0, normals)
-
     glDrawArrays(GL_QUADS, 0, len(verts))
-
     glDisableClientState(GL_VERTEX_ARRAY)
     glDisableClientState(GL_NORMAL_ARRAY)
 
-def draw_edges(voxels: Voxels, color=(0.0, 0.0, 0.0)):
-    """Draw boundary face edges as wireframe overlay."""
-    verts, _ = voxels.boundary_faces()   # (F,4,3)
-    verts = voxels.nodes_rest[verts].cpu()
 
-    # build edge list in tensor form
-    v0 = verts[:, 0]
-    v1 = verts[:, 1]
-    v2 = verts[:, 2]
-    v3 = verts[:, 3]
-
-    edges = torch.stack([
-        v0, v1,
-        v1, v2,
-        v2, v3,
-        v3, v0
-    ], dim=1).reshape(-1, 3).numpy()   # (F*8, 3)
+def _draw_edges(scene: VoxelScene, color=(0.0, 0.0, 0.0)):
+    face_nodes, _ = scene.boundary_faces()
+    if face_nodes.shape[0] == 0:
+        return
+    verts = scene.node_pos[face_nodes].cpu()     # (F,4,3)
+    v0, v1, v2, v3 = verts[:, 0], verts[:, 1], verts[:, 2], verts[:, 3]
+    edges = torch.stack([v0, v1, v1, v2, v2, v3, v3, v0], dim=1).reshape(-1, 3).numpy()
 
     glDisable(GL_LIGHTING)
     glColor3f(*color)
     glLineWidth(1.0)
-
     glEnableClientState(GL_VERTEX_ARRAY)
     glVertexPointer(3, GL_FLOAT, 0, edges)
-
     glDrawArrays(GL_LINES, 0, len(edges))
-
     glDisableClientState(GL_VERTEX_ARRAY)
     glEnable(GL_LIGHTING)
 
-def run(voxels: Voxels, title="simulation", size=(800, 800)):
-    pg.init()
-    pg.display.set_mode(size, pg.DOUBLEBUF | pg.OPENGL)
-    pg.display.set_caption(title)
-    init_gl(*size)
 
-    center = voxels.nodes_rest.mean(dim=0).tolist()
-    span   = (voxels.nodes_rest.max() - voxels.nodes_rest.min()).item()
-    cam    = Camera(distance=span * 1.8, target=center)
+def run(
+    physics: Physics,
+    dt: float = 1/60,
+    title: str = "voxels",
+    size=(800, 800),
+    tensile_yield: float = 0.15,
+    ground_y: float = -5.0,
+    enable_fracture: bool = True,
+    enable_self_collision: bool = True,
+):
+    pg.init()
+    pg.display.set_mode(size, DOUBLEBUF | OPENGL)
+    pg.display.set_caption(title)
+    _init_gl(*size)
+
+    scene = physics.scene
+    center = scene.node_pos.mean(dim=0).tolist()
+    span = (scene.node_pos.max() - scene.node_pos.min()).item()
+    cam = Camera(distance=span * 2.0, target=center)
 
     clock = pg.time.Clock()
     dragging = False
+    paused = False
 
     while True:
         for ev in pg.event.get():
-            if ev.type == pg.QUIT or (ev.type == pg.KEYDOWN and ev.key == pg.K_ESCAPE):
+            if ev.type == QUIT or (ev.type == KEYDOWN and ev.key == K_ESCAPE):
                 pg.quit()
                 return
-            elif ev.type == pg.MOUSEBUTTONDOWN and ev.button == 1:
+            elif ev.type == KEYDOWN and ev.key == K_SPACE:
+                paused = not paused
+            elif ev.type == MOUSEBUTTONDOWN and ev.button == 1:
                 dragging = True
-            elif ev.type == pg.MOUSEBUTTONUP and ev.button == 1:
+            elif ev.type == MOUSEBUTTONUP and ev.button == 1:
                 dragging = False
-            elif ev.type == pg.MOUSEMOTION and dragging:
+            elif ev.type == MOUSEMOTION and dragging:
                 cam.orbit(ev.rel[0], ev.rel[1])
-            elif ev.type == pg.MOUSEWHEEL:
+            elif ev.type == MOUSEWHEEL:
                 cam.zoom(ev.y)
 
-        glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
+        if not paused:
+            f_ext = ground_collision_forces(scene, ground_y=ground_y)
+            if enable_self_collision:
+                components = scene.connected_components()
+                f_ext = f_ext + voxel_voxel_collision_forces(scene, components)
+            physics.step(dt, external_forces=f_ext)
+
+            if enable_fracture:
+                n_broken = break_yielded_links(scene, tensile_yield=tensile_yield)
+                if n_broken > 0:
+                    print(f"fractured {n_broken} link(s) -> {scene.connected_components().max().item() + 1} components")
+
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         cam.apply()
 
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(1.0, 1.0)
-        draw_faces(voxels)
+        _draw_scene(scene)
         glDisable(GL_POLYGON_OFFSET_FILL)
-        draw_edges(voxels)
+        _draw_edges(scene)
 
         pg.display.flip()
         clock.tick(60)

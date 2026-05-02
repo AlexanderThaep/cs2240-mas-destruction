@@ -46,14 +46,15 @@ class Scene:
     def collision_candidates(self, pos: Tensor) -> tuple[Tensor, Tensor]:
         """Returns candidate voxel pairs that could be colliding based on spatial locality."""
         h = self.voxels.h
-        nodes = self.voxels.voxel_nodes                                                  # (V,8)
+        nodes = self.voxels.voxel_nodes         # (V,8)
         V = nodes.shape[0]
 
-        centroids = pos[nodes].mean(dim=1)                                                 # (V,3)
-        cells = (centroids / h).floor().long()                                             # (V,3)
-        origin = cells.min(dim=0).values - 1                                             # (3)
-        keys = morton_code(cells - origin)                                               # (V)
-        keys = keys[keys.argsort()]                                                      # voxels on Z-order curve
+        centroids = pos[nodes].mean(dim=1)          # (V,3)
+        cells = (centroids / h).floor().long()      # (V,3)
+        origin = cells.min(dim=0).values - 1        # (3)
+        morton_codes = morton_code(cells - origin)  # (V)
+        sort_idx = morton_codes.argsort()           # (V)
+        keys = morton_codes[sort_idx]               # voxels on Z-order curve
 
         # In 3D each cell is in a 3x3x3 = 27 cell neighborhood
         offsets = torch.cartesian_prod(*[torch.arange(-1, 2)] * 3)                       # (27,3)
@@ -67,13 +68,13 @@ class Scene:
             empty = torch.empty(0, dtype=torch.long)
             return empty, empty
 
-        query_voxel = torch.arange(V).repeat_interleave(27)               # (27V)
-        a = query_voxel.repeat_interleave(count)                          # (total)
-        range_start = low.repeat_interleave(count)                        # (total)
+        query_voxel = torch.arange(V).repeat_interleave(27)  # (27V)
+        a = query_voxel.repeat_interleave(count)             # (total)
+        range_start = low.repeat_interleave(count)           # (total)
         query_offset = torch.cumsum(count, dim=0) - count
-        pair_offset = query_offset.repeat_interleave(count)               # (total)
+        pair_offset = query_offset.repeat_interleave(count)  # (total)
         offset = torch.arange(total) - pair_offset
-        b = sort_idx[range_start + offset]                                # (total)
+        b = sort_idx[range_start + offset]                   # (total)
 
         keep = a < b
         return a[keep], b[keep]

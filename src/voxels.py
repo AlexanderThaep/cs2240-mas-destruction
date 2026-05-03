@@ -8,6 +8,8 @@ from scipy.sparse.csgraph import connected_components as scipy_cc
 
 from mesh import Mesh
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # 8 node offsets from a voxel's grid origin (y-up convention).
 # Nodes 0-3 are bottom (y=0), 4-7 are top (y=1).
 #   4---5        y
@@ -19,22 +21,22 @@ from mesh import Mesh
 NODE_OFFSETS = torch.tensor([
     [0,0,0], [1,0,0], [1,0,1], [0,0,1],
     [0,1,0], [1,1,0], [1,1,1], [0,1,1],
-], dtype=torch.long)
+], dtype=torch.long).to(device)
 
 # For each of the 6 faces, the 4 local node indices CCW from outside.
 # Index matches link direction (0:-x  1:+x  2:-y  3:+y  4:-z  5:+z)
 FACE_NODES = torch.tensor([
     [0,3,7,4], [1,5,6,2], [0,1,2,3],
     [4,7,6,5], [0,4,5,1], [3,2,6,7],
-], dtype=torch.long)
+], dtype=torch.long).to(device)
 
 FACE_NORMALS = torch.tensor([
     [-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1],
-], dtype=torch.float32)
+], dtype=torch.float32).to(device)
 
 NEIGHBOR_OFFSETS = torch.tensor([
     [-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1],
-], dtype=torch.long)
+], dtype=torch.long).to(device)
 
 # 28 lattice springs per voxel.
 # 12 edges + 12 face diagonals + 4 body diagonals.
@@ -49,8 +51,7 @@ VOXEL_SPRINGS = torch.tensor([
     [0,5],[1,4], [3,6],[2,7],
     # 4 body diagonals
     [0,6],[1,7],[2,4],[3,5],
-], dtype=torch.long)
-
+], dtype=torch.long).to(device)
 
 def _compute_face_pairs() -> Tensor:
     """Per-direction (local_a, local_b) corner pairs unified by a face link."""
@@ -69,20 +70,24 @@ def _compute_face_pairs() -> Tensor:
                     break
     return pairs
 
-FACE_PAIRS = _compute_face_pairs()  # (6, 4, 2)
-
+FACE_PAIRS = _compute_face_pairs().to(device)  # (6, 4, 2)
 
 def _undirected_components(n: int, src: Tensor, dst: Tensor) -> Tensor:
     """Component labels in [0, C) for an undirected graph on n nodes."""
     if src.numel() == 0:
-        return torch.arange(n, dtype=torch.long)
-    rows = np.concatenate([src.numpy(), dst.numpy()])
-    cols = np.concatenate([dst.numpy(), src.numpy()])
-    data = np.ones(rows.shape[0], dtype=np.int8)
-    adj = csr_matrix((data, (rows, cols)), shape=(n, n))
-    _, labels = scipy_cc(adj, directed=False, return_labels=True)
-    return torch.from_numpy(labels.astype(np.int64))
-
+        return torch.arange(n, device=device)
+    labels = torch.arange(n, device=device)
+    changed = True
+    while changed:
+        old = labels.clone()
+        # propagate minimum label across edges
+        min_vals = torch.minimum(labels[src], labels[dst])
+        labels[src] = torch.minimum(labels[src], min_vals)
+        labels[dst] = torch.minimum(labels[dst], min_vals)
+        changed = not torch.equal(labels, old)
+    # relabel to [0, C)
+    _, labels = torch.unique(labels, return_inverse=True)
+    return labels
 
 @dataclass
 class Voxels:
@@ -151,14 +156,24 @@ class Voxels:
             node_rest=torch.empty(0, 3),
             h=h,
         )
+
+        voxels.voxel_nodes = voxels.voxel_nodes.to(device)
+        voxels.voxel_coords = voxels.voxel_coords.to(device)
+        voxels.voxel_links = voxels.voxel_links.to(device)
+        voxels.node_rest = voxels.node_rest.to(device)
+
         voxels._build_nodes()
         voxels._build_edges()
+
+        voxels.edges = voxels.edges.to(device)
+        voxels.edge_lens_rest = voxels.edge_lens_rest.to(device)
+
         return voxels
 
     @staticmethod
     def from_meshes(meshes: List[Mesh], h: float = 1.0) -> Tuple["Voxels", List[Tensor]]:
         """Combine several Mesh objects into one Voxels grid."""
-        coords_list = [m.voxelmap[:, :3].long() for m in meshes]
+        coords_list = [m.voxelmap[:, :3].long().to(device) for m in meshes]
         bounds = [0]
         for c in coords_list:
             bounds.append(bounds[-1] + c.shape[0])
@@ -169,6 +184,7 @@ class Voxels:
             voxels.voxel_nodes[bounds[i]:bounds[i+1]].reshape(-1).unique()
             for i in range(len(meshes))
         ]
+
         return voxels, node_groups
 
     def _build_nodes(self):
@@ -196,7 +212,7 @@ class Voxels:
 
         # World position per (v, local_n); take the first occurrence per label as canonical
         node_world = (self.voxel_coords.unsqueeze(1) + NODE_OFFSETS.unsqueeze(0)).reshape(V*8, 3)
-        labels_np = labels.numpy()
+        labels_np = labels.cpu().numpy()
         sort_idx = labels_np.argsort(kind="stable")
         sorted_labels = labels_np[sort_idx]
         first = np.empty_like(sorted_labels, dtype=bool)
@@ -243,8 +259,19 @@ class Voxels:
         self.node_vel = torch.zeros_like(self.node_pos)
         vox_mass = density * (self.h ** 3)
         self.node_mass = torch.zeros(self.N, dtype=torch.float32)
+
+        if torch.cuda.is_available():
+            self.node_pos = self.node_pos.to("cuda")
+            self.node_mass = self.node_mass.to("cuda")
+            self.node_vel = self.node_vel.to("cuda")
+
+        print(f"Node rest CUDA: {self.node_rest.is_cuda}")
+        print(f"Node pos CUDA: {self.node_pos.is_cuda}")
+        print(f"Node mass CUDA: {self.node_mass.is_cuda}")
+        print(f"Node vel CUDA: {self.node_vel.is_cuda}")
+
         # each voxel distributes mass/8 to each of its 8 corners
-        weights = torch.full((self.V, 8), vox_mass / 8.0)
+        weights = torch.full((self.V, 8), vox_mass / 8.0).to(device)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
 
     def break_links(self, pairs: Tensor):
@@ -276,9 +303,9 @@ class Voxels:
         self._build_nodes()
         self._build_edges()
 
-        new_pos  = torch.zeros(self.N, 3, dtype=torch.float32)
-        new_vel  = torch.zeros(self.N, 3, dtype=torch.float32)
-        new_mass = torch.zeros(self.N, dtype=torch.float32)
+        new_pos  = torch.zeros(self.N, 3, dtype=torch.float32).to(device)
+        new_vel  = torch.zeros(self.N, 3, dtype=torch.float32).to(device)
+        new_mass = torch.zeros(self.N, dtype=torch.float32).to(device)
 
         # Bulk-copy: all (v,n) sharing a new node id share the same world pos.
         new_flat = self.voxel_nodes.reshape(-1)
@@ -288,7 +315,7 @@ class Voxels:
 
         # Recompute per-node masses from scratch using current voxel membership.
         vox_mass = old_mass.sum() / max(self.V, 1)
-        weights = torch.full((self.V, 8), vox_mass / 8.0)
+        weights = torch.full((self.V, 8), vox_mass / 8.0).to(device)
         new_mass.index_add_(0, new_flat, weights.reshape(-1))
 
         self.node_pos, self.node_vel, self.node_mass = new_pos, new_vel, new_mass

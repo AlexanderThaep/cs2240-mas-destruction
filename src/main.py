@@ -5,20 +5,26 @@ from voxels import Voxels
 from simulation import Simulation
 import window
 
+if torch.cuda.is_available():
+    print(f"GPU Available: {torch.cuda.get_device_name(0)}")
+else:
+    print("No GPU detected, running on CPU.")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # Two knights charging at each other.
-left  = Mesh.from_vox("../objects/character/chr_knight.vox")
-right = Mesh.from_vox("../objects/character/chr_knight.vox").translate([40, 0, 0])
+left  = Mesh.from_vox("objects/character/chr_knight.vox")
+right = Mesh.from_vox("objects/character/chr_knight.vox").translate([40, 0, 0])
 
 voxels, (left_nodes, right_nodes) = Voxels.from_meshes([left, right], h=1.0)
 voxels.init_state(density=1.0)
 
-voxels.node_vel[left_nodes]  = torch.tensor([ 10.0, 0.0, 0.0])
-voxels.node_vel[right_nodes] = torch.tensor([-10.0, 0.0, 0.0])
+voxels.node_vel[left_nodes]  = torch.tensor([ 10.0, 0.0, 0.0]).to(device)
+voxels.node_vel[right_nodes] = torch.tensor([-10.0, 0.0, 0.0]).to(device)
 
 sim = Simulation(
     voxels        = voxels,
-    k             = 1e3,
-    dt            = 1/60,
+    k             = 1e4,
+    dt            = 1/120,
     ground_y      = 0.0,
     self_collide  = True,
     tensile_yield = 0.15,

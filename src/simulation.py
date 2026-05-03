@@ -4,6 +4,8 @@ from voxels import Voxels
 from morton import morton_code
 from dataclasses import dataclass
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 @dataclass
 class Simulation:
     # simulation parameters
@@ -24,6 +26,7 @@ class Simulation:
     edge_dirs:  Tensor = None
 
     def __post_init__(self):
+        self.gravity = self.gravity.to(device)
         assert self.voxels.V >= 1, "Simulation requires at least one voxel"
         assert self.voxels.node_pos is not None, "Call voxels.init_state() before constructing Simulation"
 
@@ -48,7 +51,7 @@ class Simulation:
         keys = morton_codes[sort_idx]               # voxels on Z-order curve
 
         # In 3D each cell is in a 3x3x3 = 27 cell neighborhood
-        offsets = torch.cartesian_prod(*[torch.arange(-1, 2)] * 3)                       # (27,3)
+        offsets = torch.cartesian_prod(*[torch.arange(-1, 2)] * 3).to(device)                     # (27,3)
         neighbor_keys = morton_code(cells.unsqueeze(1) + offsets.unsqueeze(0) - origin)  # (V,27)
         low = torch.searchsorted(keys, neighbor_keys.reshape(-1), right=False)           # (27V)
         high = torch.searchsorted(keys, neighbor_keys.reshape(-1), right=True)           # (27V)
@@ -59,13 +62,13 @@ class Simulation:
             empty = torch.empty(0, dtype=torch.long)
             return empty, empty
 
-        query_voxel = torch.arange(V).repeat_interleave(27)  # (27V)
-        a = query_voxel.repeat_interleave(count)             # (total)
-        range_start = low.repeat_interleave(count)           # (total)
+        query_voxel = torch.arange(V).repeat_interleave(27).to(device)  # (27V)
+        a = query_voxel.repeat_interleave(count)                        # (total)
+        range_start = low.repeat_interleave(count)                      # (total)
         query_offset = torch.cumsum(count, dim=0) - count
-        pair_offset = query_offset.repeat_interleave(count)  # (total)
-        offset = torch.arange(total) - pair_offset
-        b = sort_idx[range_start + offset]                   # (total)
+        pair_offset = query_offset.repeat_interleave(count).to(device)  # (total)
+        offset = torch.arange(total).to(device) - pair_offset
+        b = sort_idx[range_start + offset]                              # (total)
 
         keep = a < b
         return a[keep], b[keep]
@@ -161,9 +164,9 @@ class Simulation:
 
             Kc = ai.shape[0]
             push_corners = push.repeat_interleave(8, dim=0)
-            ones_corners = torch.ones(Kc * 8)
-            correction = torch.zeros_like(new_pos)
-            count = torch.zeros(new_pos.shape[0])
+            ones_corners = torch.ones(Kc * 8).to(device)
+            correction = torch.zeros_like(new_pos).to(device)
+            count = torch.zeros(new_pos.shape[0]).to(device)
             correction.index_add_(0, nodes[bi].reshape(-1),  push_corners)
             correction.index_add_(0, nodes[ai].reshape(-1), -push_corners)
             count.index_add_(0, nodes[bi].reshape(-1), ones_corners)
@@ -194,6 +197,7 @@ class Simulation:
         all_links = self.voxels.voxel_links  # (V,6)
 
         va_all = torch.arange(self.voxels.V).unsqueeze(-1).expand(-1, 6).reshape(-1)  # (6V)
+        va_all = va_all.to(device)
         vb_all = all_links.reshape(-1)                                                # (6V)
         valid  = (vb_all >= 0) & (va_all < vb_all)
         links  = torch.stack([va_all[valid], vb_all[valid]], dim=-1)                  # (L,2)
@@ -239,6 +243,43 @@ class Simulation:
         b = (self.dt * M * v) + (self.dt**2 * force)
         return b
 
+    def diagonal(self) -> torch.Tensor:
+        # mass part
+        diag = self.voxels.node_mass.unsqueeze(-1).expand(-1, 3).clone()
+        e = self.voxels.edges
+        if e.shape[0] == 0:
+            return diag
+        # diag of k dhat dhat^T is k * dhat^2
+        contrib = (self.dt * self.dt * self.k) * (self.edge_dirs * self.edge_dirs)  # (E,3)
+        diag.index_add_(0, e[:, 0], contrib)
+        diag.index_add_(0, e[:, 1], contrib)
+        return 1 / diag
+
+    def _pcg(self, b: Tensor, x0: Tensor, max_iters: int, tol: float) -> Tensor:
+        b_norm_sq = (b * b).sum()
+        if b_norm_sq < 1e-30:
+            return torch.zeros_like(x0)
+        b_norm = b_norm_sq.sqrt()
+
+        x = x0.clone()
+        r = b - self.lhs_Ax(x)
+        z = r * self.diag
+        p = z.clone()
+        rz = (r * z).sum()
+        for _ in range(max_iters):
+            Ap = self.lhs_Ax(p)
+            alpha = rz / (p * Ap).sum().clamp(min=1e-30)
+            x = x + alpha * p
+            r = r - alpha * Ap
+            if (r.norm() / b_norm) < tol:
+                break
+            z = r * self.diag
+            rz_new = (r * z).sum()
+            beta = rz_new / rz
+            p = z + beta * p
+            rz = rz_new
+        return x
+
     def _cg(self, b: Tensor, x0: Tensor, max_iters: int, tol: float) -> Tensor:
         """Conjugate gradient solve x ~= A^-1 b for the SPD operator self.lhs_Ax."""
         b_norm_sq = (b * b).sum()
@@ -262,13 +303,14 @@ class Simulation:
             rs = rs_new
         return x
 
-    def step(self, max_iters: int = 50, tol: float = 1e-5) -> int:
+    def step(self, max_iters: int = 10000, tol: float = 1e-5) -> int:
         """Computes a single implicit Euler step using a preconditioned congugate gradient solver."""
         pos = self.voxels.node_pos
         self.refresh_edges(pos)
         b  = self.rhs_b(pos)
         x0 = self.dt * self.voxels.node_vel
-        new_pos = pos + self._cg(b, x0, max_iters, tol)
+        self.diag = self.diagonal()
+        new_pos = pos + self._pcg(b, x0, max_iters, tol)
         if self.self_collide:
             new_pos = self.project_collisions(new_pos)
         new_pos = self.project_ground(new_pos)

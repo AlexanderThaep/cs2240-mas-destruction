@@ -8,12 +8,11 @@ from OpenGL.GLU import *
 from voxels import Voxels
 from simulation import Simulation
 
-
 class Camera:
     def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0, 0, 0)):
         self.distance = distance
         self.yaw = yaw
-        self.pitch = pitch
+        self.pitch = -pitch
         self.target = list(target)
 
     def apply(self):
@@ -32,7 +31,6 @@ class Camera:
         self.distance *= 0.9 if delta > 0 else 1.1
         self.distance = max(1.0, self.distance)
 
-
 def _init_gl(width, height, far=2000.0):
     glEnable(GL_DEPTH_TEST)
     glEnable(GL_LIGHTING)
@@ -50,6 +48,34 @@ def _init_gl(width, height, far=2000.0):
     gluPerspective(45, width / height, 0.1, far)
     glMatrixMode(GL_MODELVIEW)
 
+def _draw_floor(height: float, size=100, color=(1.0, 0.7, 0.5)):
+    y = height
+
+    verts = torch.tensor([
+        [-size, y, -size],
+        [ size, y, -size],
+        [ size, y,  size],
+        [-size, y,  size],
+    ], dtype=torch.float32)
+
+    normals = torch.tensor([
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ], dtype=torch.float32)
+
+    verts = verts.reshape(-1).cpu().numpy()
+    normals = normals.reshape(-1).cpu().numpy()
+
+    glColor3f(*color)
+    glEnableClientState(GL_VERTEX_ARRAY)
+    glEnableClientState(GL_NORMAL_ARRAY)
+    glVertexPointer(3, GL_FLOAT, 0, verts)
+    glNormalPointer(GL_FLOAT, 0, normals)
+    glDrawArrays(GL_QUADS, 0, 4)
+    glDisableClientState(GL_VERTEX_ARRAY)
+    glDisableClientState(GL_NORMAL_ARRAY)
 
 def _draw_voxels(voxels: Voxels, color=(0.6, 0.7, 0.8)):
     face_nodes, normals = voxels.boundary_faces()
@@ -131,6 +157,7 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(1.0, 1.0)
         _draw_voxels(sim.voxels)
+        _draw_floor(sim.ground_y)
         glDisable(GL_POLYGON_OFFSET_FILL)
         _draw_edges(sim.voxels)
 

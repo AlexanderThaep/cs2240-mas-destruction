@@ -88,9 +88,8 @@ class Simulation:
         if a.numel() == 0:
             return pos
 
-        components = self.voxels.connected_components()
-        cross = components[a] != components[b]
-        a, b = a[cross], b[cross]
+        shares_node = (nodes[a].unsqueeze(-1) == nodes[b].unsqueeze(-2)).any(dim=-1).any(dim=-1)
+        a, b = a[~shares_node], b[~shares_node]
 
         if a.numel() == 0:
             return pos

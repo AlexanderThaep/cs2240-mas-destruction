@@ -259,14 +259,10 @@ class Voxels:
         self.node_pos = self.node_rest.clone()
         self.node_vel = torch.zeros_like(self.node_pos)
         vox_mass = density * (self.h ** 3)
-        self.node_mass = torch.zeros(self.N, dtype=torch.float32)
-
-        self.node_pos = self.node_pos.to(device)
-        self.node_mass = self.node_mass.to(device)
-        self.node_vel = self.node_vel.to(device)
+        self.node_mass = torch.zeros(self.N, dtype=torch.float32, device=device)
 
         # each voxel distributes mass/8 to each of its 8 corners
-        weights = torch.full((self.V, 8), vox_mass / 8.0).to(device)
+        weights = torch.full((self.V, 8), vox_mass / 8.0, device=device)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
 
     def break_links(self, pairs: Tensor):

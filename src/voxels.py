@@ -259,20 +259,10 @@ class Voxels:
         self.node_pos = self.node_rest.clone()
         self.node_vel = torch.zeros_like(self.node_pos)
         vox_mass = density * (self.h ** 3)
-        self.node_mass = torch.zeros(self.N, dtype=torch.float32)
-
-        if torch.cuda.is_available():
-            self.node_pos = self.node_pos.to("cuda")
-            self.node_mass = self.node_mass.to("cuda")
-            self.node_vel = self.node_vel.to("cuda")
-
-        print(f"Node rest CUDA: {self.node_rest.is_cuda}")
-        print(f"Node pos CUDA: {self.node_pos.is_cuda}")
-        print(f"Node mass CUDA: {self.node_mass.is_cuda}")
-        print(f"Node vel CUDA: {self.node_vel.is_cuda}")
+        self.node_mass = torch.zeros(self.N, dtype=torch.float32, device=device)
 
         # each voxel distributes mass/8 to each of its 8 corners
-        weights = torch.full((self.V, 8), vox_mass / 8.0).to(device)
+        weights = torch.full((self.V, 8), vox_mass / 8.0, device=device)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
 
     def break_links(self, pairs: Tensor):

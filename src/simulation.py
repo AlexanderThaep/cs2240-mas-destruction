@@ -3,8 +3,9 @@ from torch import Tensor
 from voxels import Voxels
 from morton import morton_code
 from dataclasses import dataclass
+import acceleration
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = acceleration.get_device()
 
 @dataclass
 class Simulation:
@@ -302,7 +303,7 @@ class Simulation:
             rs = rs_new
         return x
 
-    def step(self, max_iters: int = 10000, tol: float = 1e-5) -> int:
+    def step(self, max_iters: int = 100000, tol: float = 1e-5) -> int:
         """Computes a single implicit Euler step using a preconditioned congugate gradient solver."""
         pos = self.voxels.node_pos
         self.refresh_edges(pos)

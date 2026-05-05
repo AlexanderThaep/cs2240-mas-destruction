@@ -4,12 +4,9 @@ from mesh import Mesh
 from voxels import Voxels
 from simulation import Simulation
 import window
+import acceleration
 
-if torch.cuda.is_available():
-    print(f"GPU Available: {torch.cuda.get_device_name(0)}")
-else:
-    print("No GPU detected, running on CPU.")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = acceleration.get_device()
 
 # Two knights charging at each other.
 left  = Mesh.from_vox("objects/character/chr_knight.vox")

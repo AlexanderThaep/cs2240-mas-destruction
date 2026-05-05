@@ -7,8 +7,9 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components as scipy_cc
 
 from mesh import Mesh
+import acceleration
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = acceleration.get_device()
 
 # 8 node offsets from a voxel's grid origin (y-up convention).
 # Nodes 0-3 are bottom (y=0), 4-7 are top (y=1).

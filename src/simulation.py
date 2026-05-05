@@ -18,6 +18,7 @@ class Simulation:
     # collisions (resolved by position projection, not penalty forces)
     ground_y:        float = 0.0    # height of ground plane
     self_collide:    bool  = True   # voxel-voxel inter-component collisions
+    do_fracture:     bool  = True   # breaking links between nodes
 
     # fracture
     tensile_yield:  float = 0.15  # break links beyond this stretch amount
@@ -316,4 +317,7 @@ class Simulation:
         new_pos = self.project_ground(new_pos)
         self.voxels.node_vel = (new_pos - pos) / self.dt
         self.voxels.node_pos = new_pos
-        return self.fracture()
+        if self.do_fracture:
+            return self.fracture()
+        else:
+            return 0

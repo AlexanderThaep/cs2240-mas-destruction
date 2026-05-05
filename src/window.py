@@ -9,10 +9,10 @@ from voxels import Voxels
 from simulation import Simulation
 
 class Camera:
-    def __init__(self, distance=20.0, yaw=45.0, pitch=30.0, target=(0, 0, 0)):
+    def __init__(self, distance=20.0, yaw=45.0, pitch=-30.0, target=(0, 0, 0)):
         self.distance = distance
         self.yaw = yaw
-        self.pitch = -pitch
+        self.pitch = pitch
         self.target = list(target)
 
     def apply(self):

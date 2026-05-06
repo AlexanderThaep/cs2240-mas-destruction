@@ -52,10 +52,10 @@ class Simulation:
         sorted, sort_idx = torch.sort(morton_codes) # (V), voxels on Z-order curve
 
         # In 3D each cell is in a 3x3x3 = 27 cell neighborhood
-        offsets = torch.cartesian_prod(*[torch.arange(-1, 2)] * 3).to(device)                     # (27,3)
+        offsets = torch.cartesian_prod(*[torch.arange(-1, 2)] * 3).to(device)            # (27,3)
         neighbor_keys = morton_code(cells.unsqueeze(1) + offsets.unsqueeze(0) - origin)  # (V,27)
-        low = torch.searchsorted(sorted, neighbor_keys.reshape(-1), right=False)           # (27V)
-        high = torch.searchsorted(sorted, neighbor_keys.reshape(-1), right=True)           # (27V)
+        low = torch.searchsorted(sorted, neighbor_keys.reshape(-1), right=False)         # (27V)
+        high = torch.searchsorted(sorted, neighbor_keys.reshape(-1), right=True)         # (27V)
         count = high - low                                                               # (27V)
         total = int(count.sum())
 

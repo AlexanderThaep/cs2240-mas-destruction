@@ -1,5 +1,6 @@
 import time
 import torch
+import math
 import pygame as pg
 from pygame.locals import *
 from OpenGL.GL import *
@@ -30,6 +31,16 @@ class Camera:
     def zoom(self, delta):
         self.distance *= 0.9 if delta > 0 else 1.1
         self.distance = max(1.0, self.distance)
+
+    def translate(self, dx, dy):
+        yaw_rad = math.radians(self.yaw)
+        right = (math.cos(yaw_rad), 0, -math.sin(yaw_rad))
+        up = (0, 1, 0)
+        speed = 0.001 * self.distance
+
+        self.target[0] += (-right[0] * dx + up[0] * dy) * speed
+        self.target[1] += (-right[1] * dx + up[1] * dy) * speed
+        self.target[2] += (-right[2] * dx + up[2] * dy) * speed
 
 def _init_gl(width, height, far=2000.0):
     glEnable(GL_DEPTH_TEST)
@@ -127,6 +138,7 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
     clock = pg.time.Clock()
     dragging = False
     paused = False
+    debug = False
 
     while True:
         for ev in pg.event.get():
@@ -141,6 +153,10 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
                 dragging = False
             elif ev.type == MOUSEMOTION and dragging:
                 cam.orbit(ev.rel[0], ev.rel[1])
+            elif ev.type == MOUSEMOTION:
+                if pg.mouse.get_pressed()[1]:
+                    dx, dy = ev.rel
+                    cam.translate(dx, dy)
             elif ev.type == MOUSEWHEEL:
                 cam.zoom(ev.y)
 
@@ -148,7 +164,7 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
             t0 = time.time()
             n_broken = sim.step()
             step_ms = (time.time() - t0) * 1000
-            if n_broken > 0:
+            if n_broken > 0 and debug:
                 print(f"step {step_ms:.0f}ms  broke {n_broken} links  V={sim.voxels.V}  N={sim.voxels.N}")
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)

@@ -1,10 +1,7 @@
 import torch
 from torch import Tensor
-import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import connected_components as scipy_cc
 
 from mesh import Mesh
 import acceleration
@@ -213,14 +210,12 @@ class Voxels:
 
         # World position per (v, local_n); take the first occurrence per label as canonical
         node_world = (self.voxel_coords.unsqueeze(1) + NODE_OFFSETS.unsqueeze(0)).reshape(V*8, 3)
-        labels_np = labels.cpu().numpy()
-        sort_idx = labels_np.argsort(kind="stable")
-        sorted_labels = labels_np[sort_idx]
-        first = np.empty_like(sorted_labels, dtype=bool)
+        sorted_labels, sort_idx = torch.sort(labels)
+        first = torch.empty_like(sorted_labels, dtype=bool)
         first[0] = True
         first[1:] = sorted_labels[1:] != sorted_labels[:-1]
         rep_indices = sort_idx[first]                                   # one rep per label
-        self.node_rest = node_world[torch.from_numpy(rep_indices)].float() * self.h
+        self.node_rest = node_world[rep_indices] * self.h
 
     def _build_edges(self):
         """Deduplicated lattice springs (28 per voxel, many shared)."""
@@ -264,6 +259,8 @@ class Voxels:
         # each voxel distributes mass/8 to each of its 8 corners
         weights = torch.full((self.V, 8), vox_mass / 8.0, device=device)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
+        
+        print(f"Total node count: {self.node_pos.shape[0]}")
 
     def break_links(self, pairs: Tensor):
         """Sever a batch of voxel-voxel links given as (K,2) pairs."""

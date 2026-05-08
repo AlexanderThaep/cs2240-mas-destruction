@@ -21,6 +21,7 @@ class Simulation:
     ground_y:        float = 0.0    # height of ground plane
     self_collide:    bool  = True   # voxel-voxel inter-component collisions
     do_fracture:     bool  = True   # breaking links between nodes
+    compliance:      float = 1e-6   # XPBD contact compliance (0 = hard PBD; bigger = softer)
 
     # fracture
     tensile_yield:  float = 0.15  # break links beyond this stretch amount
@@ -94,7 +95,7 @@ class Simulation:
         return (centered @ R).abs().max(dim=1).values  # (K,3)
 
     def project_collisions(self, pos: Tensor, iters: int = 4) -> Tensor:
-        """Push apart overlapping voxels from different components (PBD-style)."""
+        """Push apart overlapping voxels via XPBD with self.compliance."""
         h = self.voxels.h
         nodes = self.voxels.voxel_nodes
         a, b = self.collision_candidates(pos)
@@ -138,6 +139,11 @@ class Simulation:
         bias = torch.zeros(15, dtype=pos.dtype, device=device)
         bias[6:] = h * 1e-3
 
+        # XPBD (per-pair Lagrange multiplier accumulated across iterations)
+        w = self.voxels.V / self.voxels.node_mass.sum()
+        alpha = self.compliance / (self.dt * self.dt)
+        lam = torch.zeros(K, device=device)
+
         correction = torch.zeros_like(pos)
         count      = torch.zeros(pos.shape[0], device=device)
         idx        = torch.arange(K, device=device)
@@ -149,18 +155,25 @@ class Simulation:
             d = (cdiff.unsqueeze(1) * axes).sum(-1).abs()                            # (K,15)
             overlap = torch.where(degenerate, torch.full_like(d, INF), r_sum - d)
             min_idx = (overlap + bias).argmin(dim=1)                                 # (K)
-            depth = overlap.gather(1, min_idx.unsqueeze(-1)).squeeze(-1)             # (K)
-            contact = depth > 0
-            if not contact.any():
+            depth = overlap.gather(1, min_idx.unsqueeze(-1)).squeeze(-1)             # (K) signed
+
+            # XPBD multiplier update
+            d_lam = (depth - alpha * lam) / (2 * w + alpha)
+            lam_new = (lam + d_lam).clamp(min=0)
+            eff = lam_new - lam
+            lam = lam_new
+
+            active = eff != 0
+            if not active.any():
                 break
 
-            pop = axes[idx, min_idx][contact]                                        # (Kc,3)
-            s = (cdiff[contact] * pop).sum(-1)
+            pop = axes[idx, min_idx][active]                                         # (Ka,3)
+            s = (cdiff[active] * pop).sum(-1)
             sign = torch.sign(s) + (s == 0).to(s.dtype)
-            push = (0.5 * depth[contact] * sign).unsqueeze(-1) * pop                 # (Kc,3)
+            push = (w * eff[active] * sign).unsqueeze(-1) * pop                      # (Ka,3)
             push8 = push.repeat_interleave(8, dim=0)
             ones8 = torch.ones(push8.shape[0], device=device)
-            na, nb = nodes_a[contact].reshape(-1), nodes_b[contact].reshape(-1)
+            na, nb = nodes_a[active].reshape(-1), nodes_b[active].reshape(-1)
 
             correction.zero_(); count.zero_()
             correction.index_add_(0, nb,  push8); correction.index_add_(0, na, -push8)
@@ -218,12 +231,13 @@ class Simulation:
 
     def lhs_Ax(self, x: Tensor) -> Tensor:
         """LHS of system Ax = b in Wu et al. [2022, Section 3.1] used in PCG solver."""
-        Mx = self.voxels.node_mass.unsqueeze(-1) * x              # (N,1)
-        edges = self.voxels.edges                                 # (E,2)
-        x_diff = x[edges[:, 0]] - x[edges[:, 1]]                  # (E,3)
-        dot = (x_diff * self.edge_dirs).sum(dim=1, keepdim=True)  # (E,1)
-        Hx = self.k * dot * self.edge_dirs                        # (E,3)
-        accum = self.dt**2 * Hx                                   # (E,3)
+        Mx = self.voxels.node_mass.unsqueeze(-1) * x               # (N,1)
+        edges = self.voxels.edges                                  # (E,2)
+        mult = self.voxels.edge_mult                               # (E)
+        x_diff = x[edges[:, 0]] - x[edges[:, 1]]                   # (E,3)
+        dot = (x_diff * self.edge_dirs).sum(dim=1, keepdim=True)   # (E,1)
+        Hx = (self.k * mult).unsqueeze(-1) * dot * self.edge_dirs  # (E,3)
+        accum = self.dt**2 * Hx                                    # (E,3)
 
         Ax = Mx
         Ax.index_add_(0, edges[:, 0], accum)

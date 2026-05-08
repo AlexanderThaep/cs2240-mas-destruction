@@ -14,7 +14,7 @@ class JacobiPreconditioner:
         sim, v = self.sim, self.sim.voxels
         diag = v.node_mass.unsqueeze(-1).expand(-1, 3).clone()
         if v.edges.shape[0]:
-            contrib = (sim.dt * sim.dt * sim.k) * (sim.edge_dirs * sim.edge_dirs)
+            contrib = (sim.dt * sim.dt * sim.k * v.edge_mult).unsqueeze(-1) * (sim.edge_dirs * sim.edge_dirs)
             diag.index_add_(0, v.edges[:, 0], contrib)
             diag.index_add_(0, v.edges[:, 1], contrib)
         self.diag_inv = 1.0 / diag

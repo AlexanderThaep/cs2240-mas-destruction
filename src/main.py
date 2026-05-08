@@ -21,12 +21,12 @@ voxels.node_vel[right_nodes] = torch.tensor([-50.0, 0.0, 0.0]).to(device)
 
 sim = Simulation(
     voxels        = voxels,
-    k             = 1e3,
+    k             = 1e5,
     dt            = 1/3600,
     ground_y      = 0.0,
     self_collide  = True,
     do_fracture   = True,
-    tensile_yield = 0.15,
+    tensile_yield = 0.01,
 )
 
 print(f"V={voxels.V}  N={voxels.N}  E={voxels.E}")

@@ -89,7 +89,7 @@ def _draw_floor(height: float, size=100, color=(1.0, 0.7, 0.5)):
     glDisableClientState(GL_NORMAL_ARRAY)
 
 def _draw_voxels(voxels: Voxels, color=(0.6, 0.7, 0.8)):
-    face_nodes, normals = voxels.boundary_faces()
+    face_nodes, _, normals = voxels.boundary_faces()
     if face_nodes.shape[0] == 0:
         return
     verts = voxels.node_pos[face_nodes].reshape(-1, 3).cpu().numpy()
@@ -104,9 +104,30 @@ def _draw_voxels(voxels: Voxels, color=(0.6, 0.7, 0.8)):
     glDisableClientState(GL_VERTEX_ARRAY)
     glDisableClientState(GL_NORMAL_ARRAY)
 
+def _draw_colored_voxels(
+    voxels: Voxels,
+    colormap=None
+):
+    face_nodes, voxel_idx, normals = voxels.boundary_faces()
+    if face_nodes.shape[0] == 0:
+        return
+    verts = voxels.node_pos[face_nodes].reshape(-1, 3).cpu().numpy()
+    normals = normals.repeat_interleave(4, dim=0).cpu().numpy()
+    colors = colormap[voxel_idx].repeat_interleave(4, dim=0).cpu().numpy()
+
+    glEnableClientState(GL_VERTEX_ARRAY)
+    glEnableClientState(GL_NORMAL_ARRAY)
+    glEnableClientState(GL_COLOR_ARRAY)
+    glVertexPointer(3, GL_FLOAT, 0, verts)
+    glNormalPointer(GL_FLOAT, 0, normals)
+    glColorPointer(3, GL_FLOAT, 0, colors)
+    glDrawArrays(GL_QUADS, 0, len(verts))
+    glDisableClientState(GL_VERTEX_ARRAY)
+    glDisableClientState(GL_NORMAL_ARRAY)
+    glDisableClientState(GL_COLOR_ARRAY)
 
 def _draw_edges(voxels: Voxels, color=(0.0, 0.0, 0.0)):
-    face_nodes, _ = voxels.boundary_faces()
+    face_nodes, _, _ = voxels.boundary_faces()
     if face_nodes.shape[0] == 0:
         return
     verts = voxels.node_pos[face_nodes].cpu()
@@ -139,6 +160,7 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
     dragging = False
     paused = True
     debug = False
+    draw = False
 
     while True:
         for ev in pg.event.get():
@@ -147,6 +169,8 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
                 return
             elif ev.type == KEYDOWN and ev.key == K_SPACE:
                 paused = not paused
+            elif ev.type == KEYDOWN and ev.key == K_TAB:
+                draw = not draw
             elif ev.type == MOUSEBUTTONDOWN and ev.button == 1:
                 dragging = True
             elif ev.type == MOUSEBUTTONUP and ev.button == 1:
@@ -172,10 +196,11 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
 
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(1.0, 1.0)
-        _draw_voxels(sim.voxels)
+        _draw_colored_voxels(sim.voxels, colormap=sim.voxels.colormap)
         _draw_floor(sim.ground_y)
         glDisable(GL_POLYGON_OFFSET_FILL)
-        _draw_edges(sim.voxels)
+        if draw:
+            _draw_edges(sim.voxels)
 
         pg.display.flip()
         clock.tick(60)

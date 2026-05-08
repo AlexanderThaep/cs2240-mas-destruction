@@ -66,6 +66,9 @@ class Mesh:
             ],
             dtype=torch.float32
         )
+        
+        color_idx = voxelmap[:, 3].long()
+        colormap = colormap[color_idx]
 
         return Mesh(
             path=path,
@@ -112,8 +115,11 @@ class Mesh:
         voxelmap = torch.stack([raw[:, 0], raw[:, 2], raw[:, 1], raw[:, 3]], dim=1).to(torch.int32)
 
         if palette is None:
-            colormap = torch.full((256, 3), 0.6, dtype=torch.float32)
+            palette = torch.full((256, 3), 0.6, dtype=torch.float32)
         else:
-            colormap = palette[:, :3].float() / 255.0
+            palette = palette[:, :3].float() / 255.0
+
+        color_idx = voxelmap[:, 3].long()
+        colormap = palette[color_idx]
 
         return Mesh(path=path, colormap=colormap, voxelmap=voxelmap)

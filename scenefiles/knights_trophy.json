@@ -21,7 +21,9 @@
 
     "objects": [
         {
-            "mesh": "objects/character/chr_knight.vox",
+            "mesh": "objects/trophy.py",
+
+            "translate": [0.0, 0.0, -10.0],
 
             "velocity": [50.0, 0.0, 0.0]
         },

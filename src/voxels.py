@@ -113,6 +113,9 @@ class Voxels:
     node_vel:        Tensor = None  # (N,3)
     node_mass:       Tensor = None  # (N)
 
+    # colormap
+    colormap:        Tensor = None  # (N,3)
+
     @property
     def V(self) -> int: return self.voxel_coords.shape[0]
     @property
@@ -181,11 +184,18 @@ class Voxels:
     def from_meshes(meshes: List[Mesh], h: float = 1.0) -> Tuple["Voxels", List[Tensor]]:
         """Combine several Mesh objects into one Voxels grid."""
         coords_list = [m.voxelmap[:, :3].long().to(device) for m in meshes]
+        colors_list = [
+            m.colormap.float().to(device)
+            for m in meshes
+        ]
         bounds = [0]
         for c in coords_list:
             bounds.append(bounds[-1] + c.shape[0])
         coords = torch.cat(coords_list, dim=0)
+        colors = torch.cat(colors_list, dim=0)
         voxels = Voxels.from_grid_coords(coords, h=h)
+        
+        voxels.colormap = colors.clone()
 
         node_groups = [
             voxels.voxel_nodes[bounds[i]:bounds[i+1]].reshape(-1).unique()
@@ -328,7 +338,7 @@ class Voxels:
         vb = self.voxel_links[va, d]
         return _undirected_components(V, va, vb)
 
-    def boundary_faces(self) -> Tuple[Tensor, Tensor]:
+    def boundary_faces(self) -> Tuple[Tensor, Tensor, Tensor]:
         """Returns (face_node_ids, face_normals). Vertex positions are
         self.node_pos[face_node_ids] — the caller chooses rest vs current."""
         mask = self.voxel_links == -1
@@ -337,7 +347,7 @@ class Voxels:
         glob  = self.voxel_nodes[voxel_idx]
         face_nodes = glob.gather(1, local)
         normals = FACE_NORMALS[face_idx]
-        return face_nodes, normals
+        return face_nodes, voxel_idx, normals
 
     def boundary_face_voxels(self) -> Tensor:
         mask = self.voxel_links == -1

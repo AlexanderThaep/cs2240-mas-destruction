@@ -213,7 +213,7 @@ class Simulation:
             rel_t = rel_t - (rel_t * n_hat).sum(-1, keepdim=True) * n_hat
             rel_t_mag = rel_t.norm(dim=-1, keepdim=True).clamp(min=1e-10)
 
-            max_t = (self.friction * 2 * w * lam[ic]).unsqueeze(-1)•
+            max_t = (self.friction * 2 * w * lam[ic]).unsqueeze(-1)
             scale = (max_t / rel_t_mag).clamp(max=1.0)
             push = -0.5 * rel_t * scale
 

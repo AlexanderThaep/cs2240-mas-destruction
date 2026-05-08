@@ -137,7 +137,7 @@ def run(sim: Simulation, title: str = "voxels", size=(800, 800)):
 
     clock = pg.time.Clock()
     dragging = False
-    paused = False
+    paused = True
     debug = False
 
     while True:

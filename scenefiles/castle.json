@@ -1,0 +1,35 @@
+{
+    "title": "monu5 -> monu7",
+
+    "voxels": {
+        "h": 1.0,
+        "density": 1.0
+    },
+
+    "simulation": {
+        "k": 100000.0,
+
+        "dt-1": 360,
+
+        "ground_y": 0.0,
+
+        "self_collide": true,
+        "do_fracture": true,
+
+        "tensile_yield": 0.05
+    },
+
+    "objects": [
+        {
+            "mesh": "objects/monument/monu7.vox"
+        },
+
+        {
+            "mesh": "objects/monument/monu5.vox",
+
+            "translate": [200.0, 60.0, 0.0],
+
+            "velocity": [-100.0, 0.0, 0.0]
+        }
+    ]
+}

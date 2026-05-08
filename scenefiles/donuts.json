@@ -1,0 +1,33 @@
+{
+    "title": "donuts clapping",
+
+    "voxels": {
+        "h": 1.0,
+        "density": 1.0
+    },
+
+    "simulation": {
+        "k": 100000.0,
+        "dt-1": 360,
+        "ground_y": 0.0,
+        "self_collide": true,
+        "do_fracture": true,
+        "tensile_yield": 0.15
+    },
+
+    "objects": [
+        {
+            "mesh": "objects/torus.py",
+
+            "translate": [0.0, 20.0, 0.0],
+
+            "velocity": [0.0, -20.0, 0.0]
+        },
+
+        {
+            "mesh": "objects/torus.py",
+
+            "velocity": [0.0, 20.0, 0.0]
+        }
+    ]
+}

@@ -1,43 +1,98 @@
+import sys
+import json
+from pathlib import Path
 import torch
 
 from mesh import Mesh
 from voxels import Voxels
 from simulation import Simulation
-import window
 import acceleration
+import window
 
-acceleration.device_info()
-device = acceleration.get_device()
+def load_tensor(x, device=None):
+    return torch.tensor(x, dtype=torch.float32, device=device)
 
-# Two knights charging at each other.
-left  = Mesh.from_vox("objects/character/chr_knight.vox")
-right = Mesh.from_vox("objects/character/chr_knight.vox").translate([40, 0, 0])
+def load_mesh(path):
+    ext = Path(path).suffix
 
-voxels, (left_nodes, right_nodes) = Voxels.from_meshes([left, right], h=1.0)
-voxels.init_state(density=1.0)
+    if ext == ".py":
+        return Mesh.from_py(path)
 
-voxels.node_vel[left_nodes]  = torch.tensor([ 50.0, 0.0, 0.0]).to(device)
-voxels.node_vel[right_nodes] = torch.tensor([-50.0, 0.0, 0.0]).to(device)
+    if ext == ".vox":
+        return Mesh.from_vox(path)
 
-sim = Simulation(
-    voxels        = voxels,
-    k             = 1e5,
-    dt            = 1/3600,
-    ground_y      = 0.0,
-    self_collide  = True,
-    do_fracture   = True,
-    tensile_yield = 0.01,
-)
+    raise ValueError(f"unsupported mesh format: {ext}")
 
-print(f"V={voxels.V}  N={voxels.N}  E={voxels.E}")
-window.run(sim, title="knight vs knight")
+def build_mesh(obj):
+    mesh = load_mesh(obj["mesh"])
 
-# Target scene
-# castle     = Mesh.from_vox("objects/monument/monu7.vox")
-# projectile = Mesh.from_vox("objects/monument/monu5.vox").translate([200, 60, 0])
-# voxels, (castle_nodes, proj_nodes) = Voxels.from_meshes([castle, projectile], h=1.0)
-# voxels.init_state(density=1.0)
-# voxels.node_vel[proj_nodes] = torch.tensor([-100.0, 0.0, 0.0]).to(device)
-# sim = Simulation(voxels=voxels, k=1e3, dt=1/60, ground_y=0.0,
-#                  self_collide=True, do_fracture=True, tensile_yield=0.05)
-# window.run(sim, title="monu5 -> monu7")
+    if "scale" in obj:
+        mesh = mesh.scale(obj["scale"])
+
+    if "translate" in obj:
+        mesh = mesh.translate(load_tensor(obj["translate"]))
+
+    return mesh
+
+def load_scene(path):
+    with open(path, "r") as f:
+        scene = json.load(f)
+
+    acceleration.device_info()
+    device = acceleration.get_device()
+
+    objects = scene["objects"]
+
+    meshes = []
+    velocities = []
+
+    for obj in objects:
+        meshes.append(build_mesh(obj))
+
+        velocities.append(
+            load_tensor(
+                obj.get("velocity", [0.0, 0.0, 0.0]),
+                device=device,
+            )
+        )
+
+    voxels, node_groups = Voxels.from_meshes(
+        meshes,
+        h=scene["voxels"]["h"],
+    )
+
+    voxels.init_state(
+        density=scene["voxels"].get("density", 1.0)
+    )
+
+    for nodes, vel in zip(node_groups, velocities):
+        voxels.node_vel[nodes] = vel
+
+    sim = Simulation(
+        voxels        = voxels,
+        k             = scene["simulation"]["k"],
+        dt            = 1 / scene["simulation"]["dt-1"],
+        ground_y      = scene["simulation"].get("ground_y", 0.0),
+        self_collide  = scene["simulation"].get("self_collide", True),
+        do_fracture   = scene["simulation"].get("do_fracture", False),
+        tensile_yield = scene["simulation"].get("tensile_yield", 0.1),
+    )
+
+    return sim, scene.get("title", "simulation")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("usage: python main.py <scene.json>")
+        sys.exit(1)
+
+    scene_path = sys.argv[1]
+
+    sim, title = load_scene(scene_path)
+
+    print(
+        f"V={sim.voxels.V}  "
+        f"N={sim.voxels.N}  "
+        f"E={sim.voxels.E}"
+    )
+
+    window.run(sim, title=title)

@@ -105,6 +105,7 @@ class Voxels:
     # spring-mass system springs
     edges:           Tensor = None  # (E,2)
     edge_lens_rest:  Tensor = None  # (E)
+    edge_mult:       Tensor = None  # (E) per-edge stiffness multiplier
 
     # simulation state
     node_rest:       Tensor = None  # (N,3)
@@ -133,6 +134,7 @@ class Voxels:
                 node_rest=torch.empty(0, 3),
                 edges=torch.empty(0, 2, dtype=torch.long),
                 edge_lens_rest=torch.empty(0),
+                edge_mult=torch.empty(0),
                 h=h,
             )
 
@@ -171,6 +173,7 @@ class Voxels:
 
         voxels.edges = voxels.edges.to(device)
         voxels.edge_lens_rest = voxels.edge_lens_rest.to(device)
+        voxels.edge_mult = voxels.edge_mult.to(device)
 
         return voxels
 
@@ -224,19 +227,21 @@ class Voxels:
         self.node_rest = node_world[rep_indices] * self.h
 
     def _build_edges(self):
-        """Deduplicated lattice springs (28 per voxel, many shared)."""
+        """Deduplicated lattice springs (28 per voxel)."""
         V = self.V
         if V == 0:
             self.edges = torch.empty(0, 2, dtype=torch.long).to(device)
             self.edge_lens_rest = torch.empty(0).to(device)
+            self.edge_mult = torch.empty(0).to(device)
             return
         s_global = self.voxel_nodes[:, VOXEL_SPRINGS].reshape(-1, 2)  # (28V, 2)
         lo = torch.minimum(s_global[:, 0], s_global[:, 1])
         hi = torch.maximum(s_global[:, 0], s_global[:, 1])
         N = self.node_rest.shape[0]
         keys = lo.long() * N + hi.long()
-        uniq_keys = torch.unique(keys)
+        uniq_keys, counts = torch.unique(keys, return_counts=True)
         self.edges = torch.stack([uniq_keys // N, uniq_keys % N], dim=1)
+        self.edge_mult = counts.to(torch.float32)
         d = self.node_rest[self.edges[:, 1]] - self.node_rest[self.edges[:, 0]]
         self.edge_lens_rest = d.norm(dim=1)
 

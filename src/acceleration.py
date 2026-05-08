@@ -13,7 +13,8 @@ def get_device():
         gpu = "cuda"
     elif torch.mps.is_available():
         # gpu = "mps"
-        # rn this is super slow on smaller scenes, but faster on larger ones.
+        # ^ rn this is super slow on smaller scenes, but faster on larger ones.
+        # also, MPS is lowky still buggy with PyTorch (it secretly discards bits in the background)
         gpu= "cpu"
     else:
         gpu = "cpu"

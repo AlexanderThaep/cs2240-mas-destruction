@@ -175,11 +175,12 @@ class Simulation:
 
     def internal_forces(self, pos: Tensor) -> Tensor:
         """Internal spring forces felt by each node (sum over Hooke's Law spring forces)."""
-        forces = torch.zeros_like(pos)  # (N,3)
-        edges = self.voxels.edges                                     # (E,2)
-        L, L0 = self.edge_lens, self.voxels.edge_lens_rest            # (E)
+        forces = torch.zeros_like(pos)                      # (N,3)
+        edges = self.voxels.edges                           # (E,2)
+        L, L0 = self.edge_lens, self.voxels.edge_lens_rest  # (E)
+        mult = self.voxels.edge_mult                        # (E) per-edge stiffness scale
 
-        force_i = (self.k * (L - L0)).unsqueeze(-1) * self.edge_dirs  # (E,3)
+        force_i = (self.k * mult * (L - L0)).unsqueeze(-1) * self.edge_dirs  # (E,3)
 
         forces.index_add_(0, edges[:, 0],  force_i)
         forces.index_add_(0, edges[:, 1], -force_i)

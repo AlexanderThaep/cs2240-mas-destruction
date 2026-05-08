@@ -3,7 +3,9 @@ from torch import Tensor
 from voxels import Voxels
 from morton import morton_code
 from dataclasses import dataclass
+
 import acceleration
+from jacobi import JacobiPreconditioner
 
 device = acceleration.get_device()
 
@@ -27,10 +29,15 @@ class Simulation:
     edge_lens:  Tensor = None
     edge_dirs:  Tensor = None
 
+    # preconditioner (for pcg)
+    precond: object = None
+
     def __post_init__(self):
         self.gravity = self.gravity.to(device)
         assert self.voxels.V >= 1, "Simulation requires at least one voxel"
         assert self.voxels.node_pos is not None, "Call voxels.init_state() before constructing Simulation"
+        if self.precond is None:
+            self.precond = JacobiPreconditioner(self)
 
     def refresh_edges(self, pos: Tensor):
         edges = self.voxels.edges
@@ -80,103 +87,90 @@ class Simulation:
         new_pos[:, 1] = pos[:, 1].clamp(min=self.ground_y)
         return new_pos
 
+    @staticmethod
+    def _obb_half_extents(corners: Tensor, R: Tensor) -> Tensor:
+        """Half-extents of OBBs given their (K,8,3) corners and (K,3,3) rotations."""
+        centered = corners - corners.mean(dim=1, keepdim=True)
+        return (centered @ R).abs().max(dim=1).values  # (K,3)
+
     def project_collisions(self, pos: Tensor, iters: int = 4) -> Tensor:
         """Push apart overlapping voxels from different components (PBD-style)."""
         h = self.voxels.h
         nodes = self.voxels.voxel_nodes
         a, b = self.collision_candidates(pos)
-
         if a.numel() == 0:
             return pos
 
-        shares_node = (nodes[a].unsqueeze(-1) == nodes[b].unsqueeze(-2)).any(dim=-1).any(dim=-1)
-        a, b = a[~shares_node], b[~shares_node]
-
+        # Drop pairs that already share a node
+        shares = (nodes[a].unsqueeze(-1) == nodes[b].unsqueeze(-2)).any(-1).any(-1)
+        a, b = a[~shares], b[~shares]
         if a.numel() == 0:
             return pos
 
         K = a.shape[0]
+        nodes_a, nodes_b = nodes[a], nodes[b]                                # (K,8)
 
-        # Candidate voxel rotations
+        # Per-pair OBB rotations and half-extents
         unique_v, inv = torch.unique(torch.cat([a, b]), return_inverse=True)
-        R_unique = self.voxels.voxel_rotations(pos, indices=unique_v)
-        R_a = R_unique[inv[:K]]                                              # (K,3,3)
-        R_b = R_unique[inv[K:]]
-        a_axes = R_a.transpose(-1, -2)                                       # (K,3,3)
-        b_axes = R_b.transpose(-1, -2)
+        R_uniq = self.voxels.voxel_rotations(pos, indices=unique_v)
+        R_a, R_b = R_uniq[inv[:K]], R_uniq[inv[K:]]                          # (K,3,3)
+        Aa, Ab = R_a.transpose(-1, -2), R_b.transpose(-1, -2)                # rows = local axes
+        ext_a = self._obb_half_extents(pos[nodes_a], R_a)                    # (K,3)
+        ext_b = self._obb_half_extents(pos[nodes_b], R_b)
 
-        # Half-extents along local axes (computed from initial corners)
-        a_corners0 = pos[nodes[a]]                                           # (K,8,3)
-        b_corners0 = pos[nodes[b]]
-        a_local = (a_corners0 - a_corners0.mean(dim=1, keepdim=True)) @ R_a
-        b_local = (b_corners0 - b_corners0.mean(dim=1, keepdim=True)) @ R_b
-        a_ext = a_local.abs().max(dim=1).values                              # (K,3)
-        b_ext = b_local.abs().max(dim=1).values
-
-        # 15 SAT axes (6 face normals + 9 edge cross products)
-        face_axes = torch.cat([a_axes, b_axes], dim=1)                       # (K,6,3)
-        edge_axes = torch.linalg.cross(
-            a_axes.unsqueeze(2).expand(-1, -1, 3, -1),                       # (K,3,3,3)
-            b_axes.unsqueeze(1).expand(-1, 3, -1, -1),
+        # 15 SAT axes: 6 face normals + 9 edge crosses
+        edge_ax = torch.linalg.cross(
+            Aa.unsqueeze(2).expand(-1, -1, 3, -1),
+            Ab.unsqueeze(1).expand(-1, 3, -1, -1),
             dim=-1,
         ).reshape(K, 9, 3)
-        all_axes = torch.cat([face_axes, edge_axes], dim=1)                  # (K,15,3)
-        norms = all_axes.norm(dim=-1, keepdim=True)
+        axes = torch.cat([Aa, Ab, edge_ax], dim=1)                           # (K,15,3)
+        norms = axes.norm(dim=-1, keepdim=True)
         degenerate = norms.squeeze(-1) < 1e-6                                # (K,15)
-        all_axes = all_axes / norms.clamp(min=1e-10)
+        axes = axes / norms.clamp(min=1e-10)
 
         # Per-OBB radius along each test axis
-        a_dots = torch.einsum('kij,klj->kil', a_axes, all_axes)              # (K,3,15)
-        b_dots = torch.einsum('kij,klj->kil', b_axes, all_axes)
-        r_sum = (a_ext.unsqueeze(-1) * a_dots.abs()).sum(dim=1) \
-              + (b_ext.unsqueeze(-1) * b_dots.abs()).sum(dim=1)              # (K,15)
+        a_proj = (axes @ Aa.transpose(-1, -2)).abs() * ext_a.unsqueeze(1)    # (K,15,3)
+        b_proj = (axes @ Ab.transpose(-1, -2)).abs() * ext_b.unsqueeze(1)
+        r_sum = a_proj.sum(-1) + b_proj.sum(-1)                              # (K,15)
 
-        # Bias (small penalty on edge-cross axes so face axes win on ties)
-        bias = torch.zeros(15, dtype=pos.dtype, device=pos.device)
+        # Bias (prefer face axes over edge crosses on ties)
+        bias = torch.zeros(15, dtype=pos.dtype, device=device)
         bias[6:] = h * 1e-3
 
-        new_pos = pos
-        idx = torch.arange(K)
-        INF = float('inf')
+        correction = torch.zeros_like(pos)
+        count      = torch.zeros(pos.shape[0], device=device)
+        idx        = torch.arange(K, device=device)
+        INF        = float('inf')
+        new_pos    = pos
 
         for _ in range(iters):
-            a_c = new_pos[nodes[a]].mean(dim=1)                                        # (K,3)
-            b_c = new_pos[nodes[b]].mean(dim=1)
-            cdiff = b_c - a_c                                                          # (K,3)
-            d = (cdiff.unsqueeze(1) * all_axes).sum(dim=-1).abs()                      # (K,15)
-            overlap = r_sum - d                                                        # (K,15)
-            overlap = torch.where(degenerate, torch.full_like(overlap, INF), overlap)
-
-            min_idx = (overlap + bias).argmin(dim=1)                                   # (K)
-            depth = overlap.gather(1, min_idx.unsqueeze(-1)).squeeze(-1)               # (K)
+            cdiff = new_pos[nodes_b].mean(1) - new_pos[nodes_a].mean(1)              # (K,3)
+            d = (cdiff.unsqueeze(1) * axes).sum(-1).abs()                            # (K,15)
+            overlap = torch.where(degenerate, torch.full_like(d, INF), r_sum - d)
+            min_idx = (overlap + bias).argmin(dim=1)                                 # (K)
+            depth = overlap.gather(1, min_idx.unsqueeze(-1)).squeeze(-1)             # (K)
             contact = depth > 0
-
             if not contact.any():
                 break
 
-            ai, bi = a[contact], b[contact]
-            pop = all_axes[idx, min_idx][contact]                                      # (Kc,3)
-            cdc = cdiff[contact]
-            dpc = depth[contact]
-            sgn = (cdc * pop).sum(dim=-1).sign()
-            sgn = torch.where(sgn == 0, torch.ones_like(sgn), sgn)
-            push = (0.5 * dpc * sgn).unsqueeze(-1) * pop                               # (Kc,3)
+            pop = axes[idx, min_idx][contact]                                        # (Kc,3)
+            s = (cdiff[contact] * pop).sum(-1)
+            sign = torch.sign(s) + (s == 0).to(s.dtype)
+            push = (0.5 * depth[contact] * sign).unsqueeze(-1) * pop                 # (Kc,3)
+            push8 = push.repeat_interleave(8, dim=0)
+            ones8 = torch.ones(push8.shape[0], device=device)
+            na, nb = nodes_a[contact].reshape(-1), nodes_b[contact].reshape(-1)
 
-            Kc = ai.shape[0]
-            push_corners = push.repeat_interleave(8, dim=0)
-            ones_corners = torch.ones(Kc * 8).to(device)
-            correction = torch.zeros_like(new_pos).to(device)
-            count = torch.zeros(new_pos.shape[0]).to(device)
-            correction.index_add_(0, nodes[bi].reshape(-1),  push_corners)
-            correction.index_add_(0, nodes[ai].reshape(-1), -push_corners)
-            count.index_add_(0, nodes[bi].reshape(-1), ones_corners)
-            count.index_add_(0, nodes[ai].reshape(-1), ones_corners)
+            correction.zero_(); count.zero_()
+            correction.index_add_(0, nb,  push8); correction.index_add_(0, na, -push8)
+            count.index_add_(0, nb, ones8);       count.index_add_(0, na, ones8)
             new_pos = new_pos + correction / count.clamp(min=1).unsqueeze(-1)
 
         return new_pos
 
     def external_forces(self, pos: Tensor) -> Tensor:
-        """External forces felt by each node (gravity only; contacts are projected)."""
+        """External forces felt by each node."""
         return self.voxels.node_mass.unsqueeze(-1) * self.gravity.unsqueeze(0)
 
     def internal_forces(self, pos: Tensor) -> Tensor:
@@ -243,18 +237,6 @@ class Simulation:
         b = (self.dt * M * v) + (self.dt**2 * force)
         return b
 
-    def diagonal(self) -> torch.Tensor:
-        # mass part
-        diag = self.voxels.node_mass.unsqueeze(-1).expand(-1, 3).clone()
-        e = self.voxels.edges
-        if e.shape[0] == 0:
-            return diag
-        # diag of k dhat dhat^T is k * dhat^2
-        contrib = (self.dt * self.dt * self.k) * (self.edge_dirs * self.edge_dirs)  # (E,3)
-        diag.index_add_(0, e[:, 0], contrib)
-        diag.index_add_(0, e[:, 1], contrib)
-        return 1 / diag
-
     def _pcg(self, b: Tensor, x0: Tensor, max_iters: int, tol: float) -> Tensor:
         b_norm_sq = (b * b).sum()
         if b_norm_sq < 1e-30:
@@ -263,7 +245,7 @@ class Simulation:
 
         x = x0.clone()
         r = b - self.lhs_Ax(x)
-        z = r * self.diag
+        z = self.precond.apply(r)
         p = z.clone()
         rz = (r * z).sum()
         for _ in range(max_iters):
@@ -273,7 +255,7 @@ class Simulation:
             r = r - alpha * Ap
             if (r.norm() / b_norm) < tol:
                 break
-            z = r * self.diag
+            z = self.precond.apply(r)
             rz_new = (r * z).sum()
             beta = rz_new / rz
             p = z + beta * p
@@ -309,7 +291,7 @@ class Simulation:
         self.refresh_edges(pos)
         b  = self.rhs_b(pos)
         x0 = self.dt * self.voxels.node_vel
-        self.diag = self.diagonal()
+        self.precond.rebuild()
         new_pos = pos + self._pcg(b, x0, max_iters, tol)
         if self.self_collide:
             new_pos = self.project_collisions(new_pos)

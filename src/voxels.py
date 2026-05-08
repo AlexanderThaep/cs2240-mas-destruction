@@ -74,17 +74,23 @@ def _undirected_components(n: int, src: Tensor, dst: Tensor) -> Tensor:
     """Component labels in [0, C) for an undirected graph on n nodes."""
     if src.numel() == 0:
         return torch.arange(n, device=device)
-    labels = torch.arange(n, device=device)
-    changed = True
-    while changed:
-        old = labels.clone()
-        # propagate minimum label across edges
-        min_vals = torch.minimum(labels[src], labels[dst])
-        labels[src] = torch.minimum(labels[src], min_vals)
-        labels[dst] = torch.minimum(labels[dst], min_vals)
-        changed = not torch.equal(labels, old)
-    # relabel to [0, C)
-    _, labels = torch.unique(labels, return_inverse=True)
+
+    parent = torch.arange(n, device=device)
+    es = torch.cat([src, dst])
+    ed = torch.cat([dst, src])
+
+    rounds = max(8, int(n).bit_length() + 4)
+    for _ in range(rounds):
+        parent = parent.scatter_reduce(0, es, parent[ed], reduce="amin", include_self=True)
+        parent = parent[parent]  # pointer jump
+
+    while True:
+        nxt = parent[parent]
+        if torch.equal(nxt, parent):
+            break
+        parent = nxt
+
+    _, labels = torch.unique(parent, return_inverse=True)
     return labels
 
 @dataclass
@@ -221,18 +227,17 @@ class Voxels:
         """Deduplicated lattice springs (28 per voxel, many shared)."""
         V = self.V
         if V == 0:
-            self.edges = torch.empty(0, 2, dtype=torch.long)
-            self.edge_lens_rest = torch.empty(0)
+            self.edges = torch.empty(0, 2, dtype=torch.long).to(device)
+            self.edge_lens_rest = torch.empty(0).to(device)
             return
-        s_local = VOXEL_SPRINGS.unsqueeze(0).expand(V, -1, -1)                 # (V,28,2)
-        s_global = torch.gather(
-            self.voxel_nodes.unsqueeze(1).expand(-1, VOXEL_SPRINGS.shape[0], -1),
-            2, s_local
-        )                                                                      # (V,28,2)
-        pairs = s_global.reshape(-1, 2)
-        pairs, _ = pairs.sort(dim=1)                # canonicalize
-        self.edges = torch.unique(pairs, dim=0)
-        d = self.node_rest[self.edges[:,1]] - self.node_rest[self.edges[:,0]]
+        s_global = self.voxel_nodes[:, VOXEL_SPRINGS].reshape(-1, 2)  # (28V, 2)
+        lo = torch.minimum(s_global[:, 0], s_global[:, 1])
+        hi = torch.maximum(s_global[:, 0], s_global[:, 1])
+        N = self.node_rest.shape[0]
+        keys = lo.long() * N + hi.long()
+        uniq_keys = torch.unique(keys)
+        self.edges = torch.stack([uniq_keys // N, uniq_keys % N], dim=1)
+        d = self.node_rest[self.edges[:, 1]] - self.node_rest[self.edges[:, 0]]
         self.edge_lens_rest = d.norm(dim=1)
 
     def voxel_rotations(self, pos: Tensor, indices: Tensor = None) -> Tensor:
@@ -259,7 +264,7 @@ class Voxels:
         # each voxel distributes mass/8 to each of its 8 corners
         weights = torch.full((self.V, 8), vox_mass / 8.0, device=device)
         self.node_mass.index_add_(0, self.voxel_nodes.reshape(-1), weights.reshape(-1))
-        
+
         print(f"Total node count: {self.node_pos.shape[0]}")
 
     def break_links(self, pairs: Tensor):

@@ -12,7 +12,9 @@ def get_device():
     if torch.cuda.is_available():
         gpu = "cuda"
     elif torch.mps.is_available():
-        gpu = "mps"
+        # gpu = "mps"
+        # rn this is super slow on smaller scenes, but faster on larger ones.
+        gpu= "cpu"
     else:
         gpu = "cpu"
     return torch.device(gpu)

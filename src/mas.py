@@ -1,8 +1,13 @@
 import torch
+from torch import Tensor
+
 from morton import morton_code
+import acceleration
+device = acceleration.get_device()
+
 
 def build_schwarz_domains(
-    positions: torch.Tensor,
+    positions: Tensor,
     domain_size: int = 32
 ):
     # morton code and sorting stuff

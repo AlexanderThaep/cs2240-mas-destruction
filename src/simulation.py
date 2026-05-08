@@ -22,6 +22,7 @@ class Simulation:
     self_collide:    bool  = True   # voxel-voxel inter-component collisions
     do_fracture:     bool  = True   # breaking links between nodes
     compliance:      float = 1e-6   # XPBD contact compliance (0 = hard PBD; bigger = softer)
+    friction:        float = 1.0    # Coulomb friction coefficient
 
     # fracture
     tensile_yield:  float = 0.15  # break links beyond this stretch amount
@@ -82,10 +83,24 @@ class Simulation:
         keep = a < b
         return a[keep], b[keep]
 
-    def project_ground(self, pos: Tensor) -> Tensor:
-        """Clamp nodes above the ground plane."""
+    def project_ground(self, pos: Tensor, prev_pos: Tensor = None) -> Tensor:
+        """Clamp nodes above ground plane; apply Coulomb tangential friction if prev_pos given."""
         new_pos = pos.clone()
-        new_pos[:, 1] = pos[:, 1].clamp(min=self.ground_y)
+        pen = (self.ground_y - pos[:, 1]).clamp(min=0)  # (N)
+        new_pos[:, 1] = pos[:, 1] + pen
+
+        if self.friction > 0 and prev_pos is not None:
+            ic = pen > 0
+            if ic.any():
+                xz = pos[ic][:, [0, 2]]
+                xz0 = prev_pos[ic][:, [0, 2]]
+                slide = xz - xz0                                         # (Kc, 2)
+                mag = slide.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+                cap = (self.friction * pen[ic]).unsqueeze(-1)
+                scale = (cap / mag).clamp(max=1.0)
+                new_xz = xz - slide * scale
+                new_pos[ic, 0] = new_xz[:, 0]
+                new_pos[ic, 2] = new_xz[:, 1]
         return new_pos
 
     @staticmethod
@@ -94,8 +109,8 @@ class Simulation:
         centered = corners - corners.mean(dim=1, keepdim=True)
         return (centered @ R).abs().max(dim=1).values  # (K,3)
 
-    def project_collisions(self, pos: Tensor, iters: int = 4) -> Tensor:
-        """Push apart overlapping voxels via XPBD with self.compliance."""
+    def project_collisions(self, pos: Tensor, prev_pos: Tensor = None, iters: int = 4) -> Tensor:
+        """Push apart overlapping voxels via XPBD with self.compliance and self.friction."""
         h = self.voxels.h
         nodes = self.voxels.voxel_nodes
         a, b = self.collision_candidates(pos)
@@ -178,6 +193,42 @@ class Simulation:
             correction.zero_(); count.zero_()
             correction.index_add_(0, nb,  push8); correction.index_add_(0, na, -push8)
             count.index_add_(0, nb, ones8);       count.index_add_(0, na, ones8)
+            new_pos = new_pos + correction / count.clamp(min=1).unsqueeze(-1)
+
+        # Coulomb friction
+        if self.friction > 0 and prev_pos is not None and (lam > 0).any():
+            ic = lam > 0
+            cdiff = new_pos[nodes_b].mean(1) - new_pos[nodes_a].mean(1)
+            d = (cdiff.unsqueeze(1) * axes).sum(-1).abs()
+            overlap = torch.where(degenerate, torch.full_like(d, INF), r_sum - d)
+            min_idx = (overlap + bias).argmin(dim=1)
+            pop = axes[idx, min_idx][ic]
+            s = (cdiff[ic] * pop).sum(-1)
+            sign = torch.sign(s) + (s == 0).to(s.dtype)
+            n_hat = sign.unsqueeze(-1) * pop                                     # (Kc,3)
+
+            ca, cb  = new_pos[nodes_a[ic]].mean(1),  new_pos[nodes_b[ic]].mean(1)
+            ca0, cb0 = prev_pos[nodes_a[ic]].mean(1), prev_pos[nodes_b[ic]].mean(1)
+            rel_t = (cb - cb0) - (ca - ca0)
+            rel_t = rel_t - (rel_t * n_hat).sum(-1, keepdim=True) * n_hat
+            rel_t_mag = rel_t.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+
+            max_t = (self.friction * 2 * w * lam[ic]).unsqueeze(-1)•
+            scale = (max_t / rel_t_mag).clamp(max=1.0)
+            push = -0.5 * rel_t * scale
+
+            push8 = push.repeat_interleave(8, dim=0)
+            ones8 = torch.ones(push8.shape[0], device=device)
+            na, nb = nodes_a[ic].reshape(-1), nodes_b[ic].reshape(-1)
+
+            correction.zero_()
+            count.zero_()
+
+            correction.index_add_(0, nb,  push8)
+            correction.index_add_(0, na, -push8)
+            count.index_add_(0, nb, ones8)
+            count.index_add_(0, na, ones8)
+
             new_pos = new_pos + correction / count.clamp(min=1).unsqueeze(-1)
 
         return new_pos
@@ -309,8 +360,8 @@ class Simulation:
         self.precond.rebuild()
         new_pos = pos + self._pcg(b, x0, max_iters, tol)
         if self.self_collide:
-            new_pos = self.project_collisions(new_pos)
-        new_pos = self.project_ground(new_pos)
+            new_pos = self.project_collisions(new_pos, prev_pos=pos)
+        new_pos = self.project_ground(new_pos, prev_pos=pos)
         self.voxels.node_vel = (new_pos - pos) / self.dt
         self.voxels.node_pos = new_pos
         if self.do_fracture:

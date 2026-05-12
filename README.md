@@ -2,7 +2,11 @@
 
 **Group Members:** Alexander Thaep, Tanish Makadia
 
-**Presentation Slides:** https://docs.google.com/presentation/d/1_hQpmnGfadxuZg-rJYMpV0KhI9LrQthv2ne7drXfGpY/edit?usp=sharing
+**Presentation Slides:** 
+
+https://docs.google.com/presentation/d/1_hQpmnGfadxuZg-rJYMpV0KhI9LrQthv2ne7drXfGpY/edit?usp=sharing
+
+<img width="500" height="750" alt="image" src="https://github.com/user-attachments/assets/4ce46baa-dc73-4b65-b09d-0d15c7adcfc4" />
 
 **Videos:**
 

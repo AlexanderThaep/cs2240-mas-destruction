@@ -1,0 +1,30 @@
+{
+    "title": "knight vs knight",
+
+    "voxels": {
+        "h": 1.0,
+        "density": 1.0
+    },
+
+    "simulation": {
+        "k": 1e5,
+        "dt-1": 3600,
+        "ground_y": 0.0,
+        "self_collide": true,
+        "do_fracture": true,
+        "tensile_yield": 0.15
+    },
+
+    "objects": [
+        {
+            "mesh": "objects/character/chr_knight.vox",
+            "velocity": [250.0, 0.0, 0.0]
+        },
+
+        {
+            "mesh": "objects/character/chr_knight.vox",
+            "translate": [40.0, 0.0, 0.0],
+            "velocity": [-250.0, 0.0, 0.0]
+        }
+    ]
+}

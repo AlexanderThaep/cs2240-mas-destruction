@@ -194,7 +194,7 @@ class Voxels:
         coords = torch.cat(coords_list, dim=0)
         colors = torch.cat(colors_list, dim=0)
         voxels = Voxels.from_grid_coords(coords, h=h)
-        
+
         voxels.colormap = colors.clone()
 
         node_groups = [
